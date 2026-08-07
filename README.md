@@ -4,7 +4,7 @@
 
 - **三种接口格式互通**：Anthropic Messages / OpenAI chat.completions / responses，请求响应格式由客户端决定，上游任意。
 - **内置 Web 界面**：黑白灰扁平管理 UI，管理供应商、模型分组、日志、API Key、Claude Code 预设。
-- **单二进制分发**：前端经 `go:embed` 内嵌，`make build` 后一个可执行文件即可运行。
+- **单二进制分发**：前端经 `go:embed` 内嵌，编译后一个可执行文件即可运行。
 - **零外部依赖**：纯 Go 标准库实现。
 
 ## 快速开始
@@ -16,12 +16,14 @@
 
 ### 构建
 
-```bash
-# 一键构建:先 npm run build(前端)再 go build ./...(内嵌前端)
-make build
+前端与后端分别编译。后端经 `go:embed` 内嵌前端构建产物 `dist/`，因此**必须先构建前端再编译 Go**：
 
-# 仅构建前端(go:embed 依赖 dist,若缺失 go build 会失败)
+```bash
+# 1) 构建前端(go:embed 依赖 dist,若缺失 go build 会失败)
 cd webui/BSRouterWebUI && npm install && npm run build
+
+# 2) 编译 Go(内嵌前端,在仓库根目录)
+cd ../.. && go build ./...
 ```
 
 ### 运行
@@ -147,14 +149,19 @@ cmd/gateway/        # 可运行入口
 
 ## 开发
 
+前端与后端分别构建：
+
 ```bash
-make build      # 一键构建(前端 + Go)
-make test       # go test ./...
-make vet        # go vet ./...
-make clean      # 清理前端构建产物
+# 前端构建(产生 dist,供 go:embed 内嵌)
+cd webui/BSRouterWebUI && npm run build
+
+# Go 编译 / 测试 / 静态检查(在仓库根目录)
+go build ./...
+go test ./... -v
+go vet ./...
 ```
 
-> 仓库通过 Makefile 管理构建；`makefile`/`Makefile` 均已在 `.gitignore` 中忽略（按需重新加入版本控制）。
+> 前端构建产物 `dist/` 与本地工具文件已在 `.gitignore` 中忽略，不入库。
 
 ## 许可证
 
