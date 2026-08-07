@@ -1,0 +1,60 @@
+# ---- 编译产物 ----
+# Go 二进制与构建缓存
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/gateway.exe
+/gateway
+cmd/gateway/gateway.exe
+*.test
+*.out
+/go.sum
+
+# 前端构建产物(go:embed 依赖,由 make build 生成)
+webui/BSRouterWebUI/dist/
+webui/BSRouterWebUI/node_modules/
+webui/BSRouterWebUI/.vite/
+*.tsbuildinfo
+
+# ---- 编辑器/IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ---- Claude 工具目录(本仓库 CLAUDE.md 与本地设置不入库) ----
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+
+# ---- 网关运行产物:配置与日志(含明文密钥,绝不入库) ----
+# 运行目录
+*.log.jsonl
+gateway.log.jsonl
+providers.json
+groups.json
+keys.json
+claude.json
+aggregates.json
+network.json
+
+# 默认配置目录(Windows %APPDATA%\BSRouter / macOS / Linux XDG)
+config.json
+egress.json
+
+# 命令运行目录 cmd/gateway/ 下的运行产物
+/cmd/gateway/*.exe
+/cmd/gateway/gateway.log.jsonl
+/cmd/gateway/providers.json
+/cmd/gateway/groups.json
+/cmd/gateway/keys.json
+/cmd/gateway/claude.json
+/cmd/gateway/aggregates.json
+/cmd/gateway/network.json
+
+# ---- 构建入口(makefile 是项目开发脚本,是否入库按需) ----
+makefile
+Makefile
