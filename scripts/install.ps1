@@ -31,12 +31,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Resolve-LatestVersion 把 -Version latest 解析为最新 release 的真实标签名
-# (经 GitHub API releases/latest),再据此拼资产 URL——资产按版本命名
-# (bsr-v0.2.0-windows-amd64.zip),不能直接按 "latest" 字面文件名下载。
+# Resolve-LatestVersion resolves -Version latest to the real tag of the newest
+# release (GitHub API releases/latest), so the asset URL can use the versioned
+# asset name (bsr-v0.2.0-windows-amd64.zip) instead of a literal "latest" file.
+# NOTE: this file must stay pure ASCII -- Windows PowerShell 5.1 reads .ps1
+# files as ANSI unless they carry a UTF-8 BOM, and non-ASCII bytes break parsing.
 function Resolve-LatestVersion {
     param([string]$BaseUrl)
-    # BaseUrl 形如 https://host/OWNER/REPO/releases/download
+    # BaseUrl looks like https://host/OWNER/REPO/releases/download
     $parts = $BaseUrl.TrimEnd('/') -split '/'
     if ($parts.Count -lt 5) { throw "cannot derive repo from base url: $BaseUrl" }
     $api = "https://api.github.com/repos/$($parts[-4])/$($parts[-3])/releases/latest"
