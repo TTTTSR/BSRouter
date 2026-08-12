@@ -44,6 +44,14 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# 以 root 运行(sudo sh)时 HOME 是 /root,默认 ~/.local 会装到 root 家目录(错地方)。
+# 未显式 --prefix 时,把默认安装目录改为系统 PATH 目录 /usr/local/bin
+# → 当前终端立即生效、无需改 rc/开新终端。
+if [ "$(id -u 2>/dev/null)" = "0" ] && [ "$PREFIX" = "$HOME/.local" ]; then
+    PREFIX=/usr/local
+    echo "==> Running as root: default install dir is $PREFIX/bin (on PATH)"
+fi
+
 BIN_DIR="$PREFIX/bin"
 
 echo "==> BSRouter bsr installer"

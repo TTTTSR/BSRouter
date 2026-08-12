@@ -20,10 +20,13 @@
 下载对应平台的网关二进制与 `bsr` 命令行，自动放入 PATH：
 
 ```bash
-# Linux / macOS
+# Linux / macOS(无需 root,装到 ~/.local/bin;新终端生效或按提示粘贴一行 export)
 curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sh
 
-# Windows（PowerShell）
+# Linux 想当前终端立即生效:装到系统 PATH 目录 /usr/local/bin(需 sudo,注意是 | sudo sh)
+curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sudo sh
+
+# Windows（PowerShell,当前窗口立即生效）
 irm https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.ps1 | iex
 ```
 
@@ -297,10 +300,15 @@ BSRouter is a Large Language Model (LLM) Gateway that provides a unified access 
 Downloads the gateway binary and the `bsr` CLI for your platform and adds them to PATH:
 
 ```bash
-# Linux / macOS
+# Linux / macOS (no root; installs to ~/.local/bin; new terminals, or paste the
+# one-line export printed at the end)
 curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sh
 
-# Windows (PowerShell)
+# Linux, usable in the CURRENT terminal right away: installs to the system
+# PATH dir /usr/local/bin (requires sudo - note: it's "| sudo sh")
+curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sudo sh
+
+# Windows (PowerShell; usable in the current window immediately)
 irm https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.ps1 | iex
 ```
 
