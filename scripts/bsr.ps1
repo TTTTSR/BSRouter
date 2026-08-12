@@ -246,7 +246,8 @@ function Show-Log {
 function Show-Version {
     Write-Host "bsr $BSR_SCRIPT_VERSION"
     Write-Host "gateway: $Gateway"
-    & $Gateway -version 2>&1
+    $out = & $Gateway -version 2>&1
+    if ($LASTEXITCODE -eq 0) { $out } else { Write-Host "(gateway does not support -version)" }
 }
 
 # --- dispatch -----------------------------------------------------------------
