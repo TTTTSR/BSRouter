@@ -15,6 +15,20 @@
 - **单二进制分发**：前端经 `go:embed` 内嵌，编译后一个可执行文件即可运行。
 - **零外部依赖**：纯 Go 标准库实现。
 
+### 一键安装（无需编译）
+
+下载对应平台的网关二进制与 `bsr` 命令行，自动放入 PATH：
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sh
+
+# Windows（PowerShell）
+irm https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.ps1 | iex
+```
+
+安装后 `bsr` 位于 `~/.local/bin`（Linux/macOS）或 `%LOCALAPPDATA%\BSRouter\bin`（Windows）。`bsr start` 后台启动网关，`bsr stop` / `restart` / `status` / `log` 管理进程。需要编译或自定义配置时见「快速开始」。
+
 ### 快速开始
 
 #### 前置
@@ -277,6 +291,20 @@ BSRouter is a Large Language Model (LLM) Gateway that provides a unified access 
 - **Built-in web UI**: black-white-gray flat management UI for providers, model groups, aggregates, logs, API keys, and Claude Code / Codex presets.
 - **Single-binary distribution**: the frontend is embedded via `go:embed`; one compiled executable runs everything.
 - **Zero external dependencies**: pure Go standard library.
+
+### One-Click Install (no compilation needed)
+
+Downloads the gateway binary and the `bsr` CLI for your platform and adds them to PATH:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/TTTTSR/BSRouter/main/scripts/install.ps1 | iex
+```
+
+After install, `bsr` lives in `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\BSRouter\bin` (Windows). `bsr start` runs the gateway in the background; `bsr stop` / `restart` / `status` / `log` manage it. See "Quick Start" to build from source or customize.
 
 ### Quick Start
 
