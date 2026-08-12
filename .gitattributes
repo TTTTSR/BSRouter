@@ -1,0 +1,12 @@
+# 跨平台换行约定:
+#   - POSIX shell 脚本必须 LF(CRLF 会被 sh 误读)
+#   - Windows batch 必须 CRLF(cmd.exe 需要)
+#   - 其余文本文件交给 git 默认处理(text=auto)
+
+*.sh text eol=lf
+scripts/bsr text eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.ps1 text eol=crlf

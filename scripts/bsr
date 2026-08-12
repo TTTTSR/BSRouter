@@ -1,0 +1,268 @@
+#!/bin/sh
+#
+# bsr — BSRouter gateway process manager (Linux / macOS; also runs in Git Bash).
+#
+# Usage:
+#   bsr <command> [gateway args...]
+#
+# Commands:
+#   start    start the gateway in the background
+#   stop     stop the running gateway (graceful TERM, then KILL after 10s)
+#   restart  stop + start (reuses the last start args, or use new ones)
+#   status   print running state (exit 0 = running, 3 = not running)
+#   run      run the gateway in the foreground (Ctrl+C exits gracefully)
+#   log      print the last 50 lines of the wrapper log; "tail"/"-f" to follow
+#   version  print bsr version, gateway path, and the gateway's -version
+#   help     this text
+#
+# Environment:
+#   BSR_GATEWAY     path to the gateway binary (overrides auto-detection)
+#   BSR_CONFIG_DIR  directory for bsr.pid / bsr.args / bsr.log (overrides default)
+#
+# The gateway binary is located in this order:
+#   $BSR_GATEWAY -> same dir as this script -> parent dir -> $PATH
+#
+# State files (in the config dir):
+#   bsr.pid   PID of the running gateway
+#   bsr.args  gateway args from the last `start` (reused by `restart`/`start`)
+#   bsr.log   wrapper log: the gateway's stdout/stderr for the current run
+#
+# Notes:
+#   - On Windows use bsr.ps1 instead; the gateway's own request log
+#     (gateway-<timestamp>.log.jsonl) is separate from the wrapper log.
+#   - Args are persisted space-joined; args containing spaces/globs should be
+#     re-passed to `restart`/`start` explicitly.
+#
+# Released under the MIT License.
+set -u
+
+BSR_SCRIPT_VERSION="1.0.0"
+
+# --- resolve script directory -------------------------------------------
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# --- locate the gateway binary ------------------------------------------
+gateway=""
+if [ -n "${BSR_GATEWAY:-}" ]; then
+    gateway=$BSR_GATEWAY
+elif [ -x "$SCRIPT_DIR/gateway" ]; then
+    gateway="$SCRIPT_DIR/gateway"
+elif [ -x "$SCRIPT_DIR/gateway.exe" ]; then
+    gateway="$SCRIPT_DIR/gateway.exe"
+elif [ -x "$SCRIPT_DIR/../gateway" ]; then
+    gateway="$SCRIPT_DIR/../gateway"
+elif [ -x "$SCRIPT_DIR/../gateway.exe" ]; then
+    gateway="$SCRIPT_DIR/../gateway.exe"
+else
+    gateway=$(command -v gateway 2>/dev/null || true)
+    [ -z "$gateway" ] && gateway=$(command -v gateway.exe 2>/dev/null || true)
+fi
+
+if [ -z "$gateway" ]; then
+    echo "bsr: cannot find the gateway binary ('gateway'/'gateway.exe')." >&2
+    echo "     Build it with 'go build ./cmd/gateway', set BSR_GATEWAY, or run the installer." >&2
+    exit 1
+fi
+# make it absolute so it keeps working after nohup/backgrounding
+case "$gateway" in
+    /*) ;;
+    *) gateway="$PWD/$gateway" ;;
+esac
+
+# --- resolve config dir ---------------------------------------------------
+os_name=$(uname -s 2>/dev/null || echo Unknown)
+if [ -n "${BSR_CONFIG_DIR:-}" ]; then
+    config_dir=$BSR_CONFIG_DIR
+elif [ "$os_name" = "Darwin" ]; then
+    config_dir="$HOME/Library/Application Support/BSRouter"
+else
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/BSRouter"
+fi
+mkdir -p "$config_dir" 2>/dev/null || true
+
+PID_FILE="$config_dir/bsr.pid"
+ARGS_FILE="$config_dir/bsr.args"
+LOG_FILE="$config_dir/bsr.log"
+
+# --- helpers -------------------------------------------------------------
+log() { echo "bsr: $*"; }
+die() { echo "bsr: $*" >&2; exit 1; }
+
+# pid_alive <pid> — true if the process exists.
+pid_alive() {
+    [ -n "$1" ] && [ "$1" -gt 0 ] 2>/dev/null && kill -0 "$1" 2>/dev/null
+}
+
+read_pid() {
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        case "$pid" in
+            ''|*[!0-9]*) pid=0 ;;
+        esac
+        echo "$pid"
+    fi
+}
+
+usage() {
+    cat <<EOF
+bsr — BSRouter gateway process manager v$BSR_SCRIPT_VERSION
+gateway: $gateway
+config : $config_dir
+
+Usage: bsr <command> [gateway args...]
+
+Commands:
+  start    start the gateway in the background
+  stop     stop the running gateway
+  restart  stop then start (reuses last args unless new ones are given)
+  status   show running state (exit 0 running, 3 stopped)
+  run      run the gateway in the foreground
+  log      show the last 50 lines of the wrapper log; 'log tail' follows
+  version  print version info
+  help     this text
+
+Examples:
+  bsr start -private
+  bsr start -addr :9000 -api-key sk-...
+  bsr restart
+  bsr log tail
+EOF
+}
+
+# --- commands ------------------------------------------------------------
+cmd_start() {
+    # reuse the args from the last start when none are given
+    if [ "$#" -eq 0 ] && [ -f "$ARGS_FILE" ]; then
+        set -- $(cat "$ARGS_FILE" 2>/dev/null || true)
+    fi
+
+    pid=$(read_pid)
+    if pid_alive "$pid"; then
+        log "already running (pid $pid). Stop it first or use 'restart'."
+        return 0
+    fi
+
+    printf '%s\n' "$*" > "$ARGS_FILE"
+
+    # launch in the background; the wrapper log is truncated for this run
+    nohup "$gateway" "$@" >"$LOG_FILE" 2>&1 &
+    newpid=$!
+    echo "$newpid" > "$PID_FILE"
+
+    # wait up to 3s for the process to appear and survive (did not die instantly)
+    i=0
+    while [ "$i" -lt 30 ]; do
+        pid_alive "$newpid" && break
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if ! pid_alive "$newpid"; then
+        rm -f "$PID_FILE"
+        echo "bsr: gateway failed to start. Last log lines:" >&2
+        tail -n 15 "$LOG_FILE" 2>/dev/null | sed 's/^/  /' >&2
+        return 1
+    fi
+
+    # settle, then require it is still alive (catches bind/startup failures
+    # that take a moment to surface, e.g. the port is already in use)
+    sleep 1
+    if ! pid_alive "$newpid"; then
+        rm -f "$PID_FILE"
+        echo "bsr: gateway exited shortly after start. Last log lines:" >&2
+        tail -n 15 "$LOG_FILE" 2>/dev/null | sed 's/^/  /' >&2
+        return 1
+    fi
+
+    log "started pid $newpid"
+    log "wrapper log: $LOG_FILE"
+    tail -n 2 "$LOG_FILE" 2>/dev/null | sed 's/^/  /' || true
+    return 0
+}
+
+cmd_stop() {
+    pid=$(read_pid)
+    if ! pid_alive "$pid"; then
+        rm -f "$PID_FILE"
+        log "not running."
+        return 0
+    fi
+    log "stopping pid $pid ..."
+    kill -TERM "$pid" 2>/dev/null || true
+    # wait up to 10s for the gateway's graceful shutdown (its own timeout)
+    i=0
+    while [ "$i" -lt 100 ]; do
+        pid_alive "$pid" || break
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if pid_alive "$pid"; then
+        log "process did not exit after graceful TERM, force killing ..."
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    log "stopped."
+    return 0
+}
+
+cmd_restart() {
+    cmd_stop
+    cmd_start "$@"
+}
+
+cmd_status() {
+    pid=$(read_pid)
+    if pid_alive "$pid"; then
+        log "running (pid $pid, log: $LOG_FILE)"
+        return 0
+    fi
+    rm -f "$PID_FILE"  # stale pid file
+    log "not running."
+    return 3
+}
+
+cmd_run() {
+    exec "$gateway" "$@"
+}
+
+cmd_log() {
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "bsr: no wrapper log yet (start the gateway first): $LOG_FILE" >&2
+        return 1
+    fi
+    if [ "${1:-}" = "tail" ] || [ "${1:-}" = "-f" ]; then
+        tail -n 50 -f "$LOG_FILE"
+    else
+        tail -n 50 "$LOG_FILE"
+    fi
+}
+
+cmd_version() {
+    echo "bsr $BSR_SCRIPT_VERSION"
+    echo "gateway: $gateway"
+    gv=$("$gateway" -version 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "$gv"
+    else
+        echo "(gateway did not answer -version)"
+    fi
+}
+
+# --- dispatch -------------------------------------------------------------
+cmd=${1:-help}
+shift 2>/dev/null || true
+
+case "$cmd" in
+    start)   cmd_start "$@" ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart "$@" ;;
+    status)  cmd_status ;;
+    run)     cmd_run "$@" ;;
+    log)     cmd_log "$@" ;;
+    version) cmd_version ;;
+    help|-h|--help) usage ;;
+    *)
+        echo "bsr: unknown command '$cmd'." >&2
+        usage >&2
+        exit 2
+        ;;
+esac
