@@ -90,6 +90,28 @@ resolve_latest() {
     fi
 }
 
+# 优先装到"当前 PATH 上且可写"的目录 → 当前终端立即生效,无需改 rc/开新终端。
+# 默认目录(<prefix>/bin,即 ~/.local/bin)已在 PATH 时直接用;否则尝试
+# ~/bin、/usr/local/bin 等已在 PATH 的可写目录;都找不到才回退默认目录 +
+# 追加 rc(新终端生效,并打印当前终端可粘贴的 export)。
+if [ "$NO_PATH" -eq 0 ]; then
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) : ;;
+        *)
+            for d in "$HOME/.local/bin" "$HOME/bin" "/usr/local/bin"; do
+                case ":$PATH:" in
+                    *":$d:"*) ;;
+                    *) continue ;;
+                esac
+                if [ -d "$d" ] && [ -w "$d" ]; then
+                    BIN_DIR="$d"
+                    break
+                fi
+            done
+            ;;
+    esac
+fi
+
 mkdir -p "$BIN_DIR" || { echo "install.sh: cannot create $BIN_DIR" >&2; exit 1; }
 
 if [ -n "$LOCAL" ]; then
@@ -144,8 +166,12 @@ echo "    bsr     : $BIN_DIR/bsr"
 
 if [ "$NO_PATH" -eq 0 ]; then
     case ":$PATH:" in
-        *":$BIN_DIR:"*) : ;;   # already on PATH
+        *":$BIN_DIR:"*)
+            echo "==> $BIN_DIR is already on PATH; bsr is usable immediately."
+            ;;
         *)
+            # 子进程无法修改当前 shell 的 PATH:追加到 rc 只对"新终端"生效。
+            # 当前终端要立即用,给一条可粘贴的 export 命令。
             rc=""
             if [ -n "${SHELL:-}" ]; then
                 case "$SHELL" in
@@ -160,8 +186,10 @@ if [ "$NO_PATH" -eq 0 ]; then
             else
                 echo "$line" >> "$rc"
             fi
-            echo "==> Added $BIN_DIR to PATH in $rc"
-            echo "    Run 'source $rc' or open a new terminal."
+            echo "==> Added $BIN_DIR to PATH in $rc (new terminals find bsr automatically)."
+            echo "    To use bsr in the CURRENT terminal, paste and run:"
+            echo "      $line"
+            echo "    (or simply: source $rc)"
             ;;
     esac
 else

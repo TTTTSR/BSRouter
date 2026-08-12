@@ -101,12 +101,19 @@ if (-not $NoPath) {
     if ($userPath -notlike "*$BinDir*") {
         $newPath = if ($userPath) { "$userPath;$BinDir" } else { $BinDir }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Host "==> Added $BinDir to the user PATH (effective in new terminals)."
+        Write-Host "==> Added $BinDir to the user PATH (new terminals)."
     } else {
-        Write-Host "==> $BinDir is already on the user PATH."
+        Write-Host "==> $BinDir is already on the user PATH (new terminals)."
+    }
+    # Current session takes effect immediately (irm|iex runs in this session):
+    # prepend $BinDir to $env:Path so bsr works in THIS window right now.
+    if ($env:Path -notlike "*$BinDir*") {
+        $env:Path = "$BinDir;$env:Path"
+        Write-Host "==> bsr is usable in the CURRENT window immediately."
     }
 } else {
     Write-Host "==> PATH modification skipped (-NoPath). Add $BinDir to PATH manually."
+    Write-Host ('    To use right now in this window: $env:Path = "' + $BinDir + ';$env:Path"')
 }
 
 Write-Host '==> Done. Open a new terminal and run: bsr start'
