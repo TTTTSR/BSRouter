@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -52,8 +53,11 @@ type anthropicSSEData struct {
 }
 
 // DecodeAnthropicSSE 把 Anthropic SSE 流解码为规范化流式事件。
+// 检测流被截断(EOF 却未收到 message_stop/error 终止事件):补发 StreamError 并返回
+// UpstreamStreamError,使请求日志能记录该失败。
 func DecodeAnthropicSSE(r io.Reader, emit func(StreamEvent) error) error {
-	return ReadSSE(r, func(blk SSEBlock) error {
+	seenTerminal := false
+	err := ReadSSE(r, func(blk SSEBlock) error {
 		if blk.Event == "ping" || len(blk.Data) == 0 {
 			return nil
 		}
@@ -111,17 +115,28 @@ func DecodeAnthropicSSE(r io.Reader, emit func(StreamEvent) error) error {
 			}
 		case "message_stop":
 			ev = StreamEvent{Type: StreamMessageStop}
+			seenTerminal = true
 		case "error":
 			msg := ""
 			if d.Error != nil {
 				msg = d.Error.Message
 			}
 			ev = StreamEvent{Type: StreamError, Error: msg}
+			seenTerminal = true // error 事件本身即终态,不把它当截断
 		default:
 			return nil
 		}
 		return emit(ev)
 	})
+	if err != nil {
+		return err
+	}
+	if !seenTerminal {
+		const msg = "upstream stream ended unexpectedly (missing message_stop)"
+		_ = emit(StreamEvent{Type: StreamError, Error: msg})
+		return &UpstreamStreamError{Cause: errors.New(msg)}
+	}
+	return nil
 }
 
 // EncodeAnthropicSSE 把一条规范化流式事件编码为 Anthropic SSE 写入 w。

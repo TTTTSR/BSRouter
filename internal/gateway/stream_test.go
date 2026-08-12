@@ -82,6 +82,25 @@ func collectDecoded(t *testing.T, format string, input string) []StreamEvent {
 	return out
 }
 
+// collectDecodedAllowErr 与 collectDecoded 相同,但允许解码返回非 nil error(如流被截断),
+// 断言其为 UpstreamStreamError,并把 error 一并返回给调用方进一步断言。
+func collectDecodedAllowErr(t *testing.T, format string, input string) ([]StreamEvent, error) {
+	t.Helper()
+	dec, ok := DecoderFor(format)
+	if !ok {
+		t.Fatalf("no decoder for %q", format)
+	}
+	var out []StreamEvent
+	err := dec(strings.NewReader(input), func(ev StreamEvent) error {
+		out = append(out, ev)
+		return nil
+	})
+	if err != nil && !IsUpstreamStreamError(err) {
+		t.Fatalf("decode %s: want UpstreamStreamError, got %T: %v", format, err, err)
+	}
+	return out, err
+}
+
 // OpenAI Chat SSE → 规范化:文本 + 工具调用 + 结束。
 func TestDecodeCompletionSSE(t *testing.T) {
 	input := "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
@@ -119,7 +138,11 @@ func TestDecodeCompletionSSETruncatedToolCall(t *testing.T) {
 		"data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Edit\",\"arguments\":\"\"}}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"replace_all\\\":false,\\\"file_path\\\":\\\"G:\\\\x\"}}]}}]}\n\n"
 	// 无 [DONE]、无 finish_reason —— 流在此 EOF。
-	evs := collectDecoded(t, FormatCompletion, input)
+	// 截断应返回 UpstreamStreamError(使请求日志能记录),同时事件仍以 StreamError 收尾。
+	evs, decErr := collectDecodedAllowErr(t, FormatCompletion, input)
+	if decErr == nil {
+		t.Fatalf("truncated stream should return a non-nil error")
+	}
 
 	if len(evs) == 0 || evs[len(evs)-1].Type != StreamError {
 		t.Fatalf("last event = %+v, want StreamError (truncated stream); events:\n%+v", lastOrNil(evs), evs)

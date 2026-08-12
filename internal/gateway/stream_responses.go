@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -48,8 +49,11 @@ type responsesSSEData struct {
 }
 
 // DecodeResponsesSSE 把 OpenAI Responses SSE 流解码为规范化流式事件。
+// 检测流被截断(EOF 却未收到 response.completed/failed/incomplete 终止事件):
+// 补发 StreamError 并返回 UpstreamStreamError,使请求日志能记录该失败。
 func DecodeResponsesSSE(r io.Reader, emit func(StreamEvent) error) error {
-	return ReadSSE(r, func(blk SSEBlock) error {
+	seenTerminal := false
+	err := ReadSSE(r, func(blk SSEBlock) error {
 		if len(blk.Data) == 0 {
 			return nil
 		}
@@ -105,6 +109,7 @@ func DecodeResponsesSSE(r io.Reader, emit func(StreamEvent) error) error {
 					ev.Usage = usageFromParts(u.InputTokens, u.OutputTokens, cached, 0)
 				}
 			}
+			seenTerminal = true
 			if err := emit(ev); err != nil {
 				return err
 			}
@@ -114,6 +119,7 @@ func DecodeResponsesSSE(r io.Reader, emit func(StreamEvent) error) error {
 			if d.Response != nil {
 				ev.StopReason = statusToStopReason(d.Response.Status)
 			}
+			seenTerminal = true
 			if err := emit(ev); err != nil {
 				return err
 			}
@@ -124,11 +130,21 @@ func DecodeResponsesSSE(r io.Reader, emit func(StreamEvent) error) error {
 				msg = d.Error.Message
 			}
 			ev = StreamEvent{Type: StreamError, Error: msg}
+			seenTerminal = true // error 事件本身即终态,不把它当截断
 		default:
 			return nil
 		}
 		return emit(ev)
 	})
+	if err != nil {
+		return err
+	}
+	if !seenTerminal {
+		const msg = "upstream stream ended unexpectedly (missing response.completed)"
+		_ = emit(StreamEvent{Type: StreamError, Error: msg})
+		return &UpstreamStreamError{Cause: errors.New(msg)}
+	}
+	return nil
 }
 
 func statusToStopReason(status string) string {

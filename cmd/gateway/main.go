@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -34,6 +35,9 @@ import (
 
 // shutdownTimeout 是优雅退出时等待在途请求完成的最长时间。
 const shutdownTimeout = 10 * time.Second
+
+// version 是构建时注入的版本号(经 -ldflags "-X main.version=..." 覆盖);默认 dev。
+var version = "dev"
 
 // defaultConfigDir 返回按平台惯例的 BSRouter 用户配置目录(Go os.UserConfigDir 映射:
 // Windows %APPDATA%\BSRouter / macOS ~/Library/Application Support/BSRouter /
@@ -212,8 +216,19 @@ func main() {
 		codexModelCatalog = flag.String("codex-model-catalog", "", "path to local codex model catalog json to override (default ~/.codex/bsrouter-models.json)")
 		// 覆盖本地 Codex 模型缓存的目标文件路径;留空默认 ~/.codex/models_cache.json(桌面 app 读)。
 		codexModelsCache = flag.String("codex-models-cache", "", "path to local codex models cache json to override (default ~/.codex/models_cache.json)")
+		// 上游流式响应体 idle 超时:两字节数据到达间隔超过该值即中止流(上游挂起/断流时
+		// 避免无限等待并让错误可被记录)。默认 0 禁用(思考模型可能长时间无增量,启用时
+		// 建议 ≥120s)。
+		streamIdleTimeout = flag.Duration("stream-idle-timeout", 0, "upstream stream idle timeout (0 disables; abort when no stream data for this long, e.g. 120s)")
+		// 流开始前失败(请求发送错误 / 上游非 2xx)的每成员重试次数;默认 2(共尝试 3 次)。
+		streamRetries = flag.Int("stream-retries", 2, "retries per member for pre-stream failures (5xx / transport; 0 disables)")
+		ver = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+	if *ver {
+		fmt.Printf("BSRouter gateway %s\n", version)
+		os.Exit(0)
+	}
 
 	// 日志完整度:显式 -log-detail 优先,否则读持久化文件,都无则 default。
 	explicit := map[string]bool{}
@@ -342,7 +357,7 @@ func main() {
 		log.Printf("deployment: -public-addr set, advertising base %s", strings.TrimRight(*publicAddr, "/"))
 	}
 
-	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithCodexPresets(xm).WithAggregates(am).WithDeployment(dep).WithNetworkManager(nm)
+	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithCodexPresets(xm).WithAggregates(am).WithDeployment(dep).WithNetworkManager(nm).WithStreamIdleTimeout(*streamIdleTimeout).WithStreamRetries(*streamRetries)
 	if *logDetailFile != "" {
 		srv = srv.WithLogDetailPath(*logDetailFile)
 	}

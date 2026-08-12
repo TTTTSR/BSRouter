@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,7 +74,10 @@ func ReadSSE(r io.Reader, fn func(SSEBlock) error) error {
 			if err == io.EOF {
 				return emit()
 			}
-			return err
+			// 非 EOF 读错误视为上游侧失败(连接重置/超时/HTTP/2 中断等)。
+			// 包装为 UpstreamStreamError,与"客户端写错误(emit 失败)"区分——
+			// 后者保持原样返回,供上层判断"客户端是否已断开、该不该记日志"。
+			return &UpstreamStreamError{Cause: err}
 		}
 		if line == "" {
 			if err := emit(); err != nil {
@@ -81,6 +85,28 @@ func ReadSSE(r io.Reader, fn func(SSEBlock) error) error {
 			}
 		}
 	}
+}
+
+// UpstreamStreamError 表示流因上游原因提前结束(截断 / 读体失败),而非客户端断开。
+// 上层(如请求日志)据此区分:客户端断开且非上游错误(用户手动中断)不记 error,
+// 客户端断开但上游同时失败(截断/读体失败)也要记 error。
+type UpstreamStreamError struct {
+	Cause error
+}
+
+func (e *UpstreamStreamError) Error() string {
+	if e.Cause == nil {
+		return "upstream stream error"
+	}
+	return e.Cause.Error()
+}
+
+func (e *UpstreamStreamError) Unwrap() error { return e.Cause }
+
+// IsUpstreamStreamError 报告 err(或其包装链)是否为 UpstreamStreamError。
+func IsUpstreamStreamError(err error) bool {
+	var e *UpstreamStreamError
+	return errors.As(err, &e)
 }
 
 // ---- 规范化流式事件(通用中间类型) ----
@@ -204,6 +230,11 @@ func doStream(ctx context.Context, httpc *http.Client, method, url string, heade
 	}
 	landed := resp.Request.URL.String()
 	resp.Body = newCaptureBody(ctx, resp.Body, landed, reqBytes, resp.StatusCode)
+	// idle 超时包在最外层:读取走 idle → capture → real;超时 Close 仍会触发
+	// capture 的转发详情收集(记到已接收的部分数据)。
+	if d := streamIdleTimeout(ctx); d > 0 {
+		resp.Body = newIdleTimeoutReadCloser(resp.Body, d)
+	}
 	return resp, nil
 }
 

@@ -209,7 +209,8 @@ func TestRewriteSSEModel(t *testing.T) {
 			"responses", FormatResponses,
 			`event: response.created` + "\n" +
 				`data: {"type":"response.created","response":{"id":"r1","model":"deepseek","status":"in_progress"}}` + "\n\n" +
-				`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n",
+				`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"id":"r1","model":"deepseek","status":"completed"}}` + "\n\n",
 			[]string{`event: response.created`, `"model":"full@model"`, `"delta":"hi"`},
 			[]string{`"model":"deepseek"`},
 		},
@@ -217,21 +218,25 @@ func TestRewriteSSEModel(t *testing.T) {
 			"anthropic", FormatAnthropic,
 			`event: message_start` + "\n" +
 				`data: {"type":"message_start","message":{"id":"m1","model":"deepseek","content":[]}}` + "\n\n" +
-				`data: {"type":"content_block_delta","delta":{"text":"hi"}}` + "\n\n",
+				`data: {"type":"content_block_delta","delta":{"text":"hi"}}` + "\n\n" +
+				`event: message_stop` + "\n" +
+				`data: {"type":"message_stop"}` + "\n\n",
 			[]string{`event: message_start`, `"model":"full@model"`, `"text":"hi"`},
 			[]string{`"model":"deepseek"`},
 		},
 		{
 			"non-json-data-passthrough", FormatCompletion,
 			`data: plain text not json` + "\n\n" +
-				`event: ping` + "\n\n",
-			[]string{`data: plain text not json`, `event: ping`},
+				`event: ping` + "\n\n" +
+				`data: [DONE]` + "\n\n",
+			[]string{`data: plain text not json`, `event: ping`, `data: [DONE]`},
 			nil,
 		},
 		{
 			"already-correct-model", FormatCompletion,
-			`data: {"model":"full@model","choices":[]}` + "\n\n",
-			[]string{`data: {"model":"full@model"`},
+			`data: {"model":"full@model","choices":[]}` + "\n\n" +
+				`data: [DONE]` + "\n\n",
+			[]string{`data: {"model":"full@model"`, `data: [DONE]`},
 			nil,
 		},
 	}

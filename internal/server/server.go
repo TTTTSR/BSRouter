@@ -74,6 +74,12 @@ type Server struct {
 	// deployment 部署形态(由 cmd/gateway 启动时判定);netm 是出口地址配置。
 	deployment *Deployment
 	netm       *network.Manager
+	// streamIdleTimeout 上游流式响应体 idle 超时(两字节到达间隔超过即中止,0=禁用);
+	// 经 WithStreamIdleTimeout 注入,直通与转换路径生效。
+	streamIdleTimeout time.Duration
+	// streamRetries 流开始前失败(请求发送错误 / 上游非 2xx)的每成员重试次数,0=禁用。
+	// 由 cmd/gateway 经 WithStreamRetries 显式启用(默认 2),测试用 New(m) 构造时保持 0 不重试。
+	streamRetries int
 }
 
 // New 基于供应商注册表构造网关服务。
@@ -117,6 +123,20 @@ func (s *Server) WithLogDetail(detail string) *Server {
 // WithLogDetailPath 设置日志完整度持久化文件路径(管理端点 PUT 时写回)。
 func (s *Server) WithLogDetailPath(path string) *Server {
 	s.logDetailPath = path
+	return s
+}
+
+// WithStreamIdleTimeout 设置上游流式响应体的 idle 超时(两字节到达间隔超过该值即中止,
+// 0=禁用)。经请求上下文注入,转换与直通、统一 API 与分组路径同时生效。
+func (s *Server) WithStreamIdleTimeout(d time.Duration) *Server {
+	s.streamIdleTimeout = d
+	return s
+}
+
+// WithStreamRetries 设置流开始前失败的每成员重试次数(0=禁用;仅对流开始前的
+// 请求发送错误 / 上游非 2xx 生效,流中途失败不重试)。
+func (s *Server) WithStreamRetries(n int) *Server {
+	s.streamRetries = n
 	return s
 }
 
@@ -429,6 +449,17 @@ func keepForwardDetail(s *Server, rec *logRecord, status int) bool {
 	return rec.error != "" || status >= 400
 }
 
+// recordStreamError 记录流式错误:客户端未断开记一切错误;客户端已断开仅记源于上游的
+// 错误(截断/读体失败/上游 error 事件),避免把用户手动中断(Esc/新消息取代)误报为上游故障。
+func recordStreamError(rec *logRecord, ctx context.Context, err error) {
+	if rec == nil || rec.error != "" {
+		return
+	}
+	if ctx.Err() == nil || gateway.IsUpstreamStreamError(err) {
+		rec.error = captureBody(err.Error(), "")
+	}
+}
+
 // logMiddleware 记录所有 API 请求的访问日志(JSONL)。处于最外层,鉴权拒绝的请求也记录;
 // 使用 defer 保证 handler panic 时也写入日志(补齐 500)。前端静态资源请求不写入日志。
 func (s *Server) logMiddleware(next http.Handler) http.Handler {
@@ -695,6 +726,7 @@ func (s *Server) resolveDirectTarget(fullModel, clientFormat string) (*directTar
 }
 
 // directCapture 注入转发详情收集器(抹除该供应商 api_key)并设置日志供应商前缀。
+// 同时注入流式 idle 超时(覆盖直通 + 分组直通;directComplete 调用它但 doRaw 不读该值,无副作用)。
 func (s *Server) directCapture(ctx context.Context, p provider.Provider, label string) context.Context {
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.provider = label
@@ -707,7 +739,7 @@ func (s *Server) directCapture(ctx context.Context, p provider.Provider, label s
 			rec.upstreamStatus = status
 		})
 	}
-	return ctx
+	return gateway.WithStreamIdleTimeout(ctx, s.streamIdleTimeout)
 }
 
 // directComplete 执行一次非流式直通转发:命中返回 true(响应已写出)。
@@ -849,10 +881,9 @@ func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel 
 	w.WriteHeader(http.StatusOK)
 	if err := gateway.RewriteSSEModel(w, body, clientFormat, fullModel); err != nil {
 		// 客户端断开或上游流中断:响应已发出,无法改写状态码。
+		// 客户端未断开记一切错误;客户端已断开仅记源于上游的错误(截断/读体失败)。
 		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
-			if r.Context().Err() == nil {
-				rec.error = captureBody(err.Error(), "")
-			}
+			recordStreamError(rec, r.Context(), err)
 		}
 	}
 	if flusher != nil {
@@ -1055,11 +1086,10 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, req *gatewa
 		rec = rv
 		out = newCaptureWriter(w) // 记录转换后回客户端的 SSE 前段
 	}
-	if err := s.writeSSE(out, clientFormat, upFormat, fullModel, body); err != nil {
+	if err := s.writeSSE(out, rec, clientFormat, upFormat, fullModel, body); err != nil {
 		// 客户端断开或上游流中断:响应已发出,无法改写状态码。
-		if rec != nil && r.Context().Err() == nil {
-			rec.error = captureBody(err.Error(), "")
-		}
+		// 客户端未断开记一切错误;客户端已断开仅记源于上游的错误(截断/读体失败)。
+		recordStreamError(rec, r.Context(), err)
 	}
 	if rec != nil {
 		rec.convertedResponseBody = captureBody(string(out.(*captureWriter).buf), "")
@@ -1082,21 +1112,77 @@ func (s *Server) streamComplete(ctx context.Context, req *gateway.Request, fullM
 			rec.upstreamStatus = status
 		})
 	}
+	// 注入流式 idle 超时(覆盖转换 + 分组转换;直通经 directCapture)。
+	ctx = gateway.WithStreamIdleTimeout(ctx, s.streamIdleTimeout)
 	upFormat := string(p.ModelKind(model))
 	req.Model = model // 去掉供应商前缀,以上游真实模型名请求
-	body, err := p.Stream(ctx, req)
-	if err != nil {
-		redacted := redactKey(err, p.Config().APIKey)
-		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
-			rec.error = captureBody(redacted.Error(), "")
-			var sg interface{ HTTPStatus() int }
-			if errors.As(err, &sg) {
-				rec.upstreamStatus = sg.HTTPStatus()
-			}
+
+	// 流开始前失败(请求发送错误 / 上游非 2xx)做有限重试:客户端断开(ctx 取消)即停,
+	// 4xx 不重试。重试在单个成员内部,与聚合故障转移(成员之间)共存——成员重试耗尽
+	// 仍算一次 send(member) 失败,failoverForward 再切换到下一成员。
+	var body io.ReadCloser
+	var err error
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil, "", redactKey(ctx.Err(), p.Config().APIKey)
 		}
-		return nil, "", redacted
+		body, err = p.Stream(ctx, req)
+		if err == nil {
+			return body, upFormat, nil
+		}
+		if !s.retryableStreamError(ctx, err) || attempt >= s.streamRetries {
+			break
+		}
+		if serr := sleepStreamRetry(ctx, attempt); serr != nil {
+			return nil, "", redactKey(serr, p.Config().APIKey)
+		}
 	}
-	return body, upFormat, nil
+	redacted := redactKey(err, p.Config().APIKey)
+	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
+		rec.error = captureBody(redacted.Error(), "")
+		var sg interface{ HTTPStatus() int }
+		if errors.As(err, &sg) {
+			rec.upstreamStatus = sg.HTTPStatus()
+		}
+	}
+	return nil, "", redacted
+}
+
+// retryableStreamError 判断一次流开始前失败是否值得重试:
+// 客户端已断开不重试;上游 5xx(503/502/504 等)与连接/超时错误重试;4xx(鉴权/参数)不重试。
+func (s *Server) retryableStreamError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var sg interface{ HTTPStatus() int }
+	if errors.As(err, &sg) {
+		return sg.HTTPStatus() >= 500
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// 连接/传输错误经 net 包的 *url.Error 暴露。
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return true
+	}
+	return false
+}
+
+// sleepStreamRetry 重试前的退避等待:2^attempt * 500ms,封顶 3s;ctx 取消则立即返回。
+func sleepStreamRetry(ctx context.Context, attempt int) error {
+	d := time.Duration(1<<attempt) * 500 * time.Millisecond
+	if d > 3*time.Second {
+		d = 3 * time.Second
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // streamRoute 转发一个流式请求:聚合模型做故障转移(流开始前可切换到其余成员),否则
@@ -1135,7 +1221,9 @@ func (s *Server) streamRoute(ctx context.Context, req *gateway.Request) (io.Read
 
 // writeSSE 把上游 SSE 流经规范化中间类型转换后写回客户端。
 // 上游格式 SSE →(解码器)→ 规范化事件 →(模型回填等格式无关变换)→(编码器)→ 客户端格式 SSE。
-func (s *Server) writeSSE(w http.ResponseWriter, clientFormat, upFormat, fullModel string, body io.Reader) error {
+// rec 非空时,在写出 error 事件前先记录 rec.error——客户端若随后断开,写会失败但日志不丢;
+// 这同时修复"上游 anthropic/responses error 事件不记日志"的既有盲区。
+func (s *Server) writeSSE(w http.ResponseWriter, rec *logRecord, clientFormat, upFormat, fullModel string, body io.Reader) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1153,6 +1241,9 @@ func (s *Server) writeSSE(w http.ResponseWriter, clientFormat, upFormat, fullMod
 		// 规范化 → 规范化:回填响应模型为客户端请求的完整模型名。
 		if ev.Type == gateway.StreamMessageStart {
 			ev.Model = fullModel
+		}
+		if ev.Type == gateway.StreamError && rec != nil && ev.Error != "" {
+			rec.error = captureBody(ev.Error, "")
 		}
 		if err := encoder(w, ev); err != nil {
 			return err

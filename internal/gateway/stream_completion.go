@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -78,7 +79,11 @@ func DecodeCompletionSSE(r io.Reader, emit func(StreamEvent) error) error {
 	err := ReadSSE(r, d.handle)
 	if err != nil {
 		d.errClosed = true
-		_ = d.emit(StreamEvent{Type: StreamError, Error: err.Error()})
+		// 仅对上游读错误补发 StreamError(客户端若还连着能收到);客户端写错误
+		// (emit 已失败并传播到 ReadSSE)说明客户端已断开,补发只会再次失败。
+		if IsUpstreamStreamError(err) {
+			_ = d.emit(StreamEvent{Type: StreamError, Error: err.Error()})
+		}
 		return err
 	}
 	return d.finish()
@@ -329,11 +334,14 @@ func (d *completionDecoder) onDone() error {
 }
 
 // finish 流自然结束(未收到 [DONE])时收尾;出错时不补发 message_delta/message_stop。
+// 截断(已开始输出却未收到 finish_reason/[DONE])与空流都返回 UpstreamStreamError,
+// 使调用方(writeSSE → 请求日志)能记录该失败;对客户端的 emit 行为保持不变。
 func (d *completionDecoder) finish() error {
 	if d.errClosed || d.done {
 		return nil
 	}
-	if !d.sentStart {
+	empty := !d.sentStart
+	if empty {
 		// 空流:补一个最小 message_start + message_delta + message_stop,避免客户端挂起。
 		if err := d.emit(StreamEvent{Type: StreamMessageStart}); err != nil {
 			return err
@@ -351,7 +359,7 @@ func (d *completionDecoder) finish() error {
 		}
 		d.pending = nil
 	}
-	if d.sentStart && !d.hasDelta {
+	if !empty && d.sentStart && !d.hasDelta {
 		// 上游流被截断:已开始输出却未收到 finish_reason/[DONE](如模型输出被
 		// 截断在工具调用参数中途)。关闭未结束的内容块,再以截断错误收尾——
 		// 不能假装正常结束,否则客户端拿到未闭合的 tool_use 块会把残缺的工具
@@ -359,9 +367,18 @@ func (d *completionDecoder) finish() error {
 		if err := d.closeBlocks(); err != nil {
 			return err
 		}
-		return d.emit(StreamEvent{Type: StreamError, Error: "upstream stream ended unexpectedly (missing finish_reason/[DONE])"})
+		const truncMsg = "upstream stream ended unexpectedly (missing finish_reason/[DONE])"
+		// 忽略 emit 的写错误(客户端已断开时写会失败),仍返回截断错误供日志记录。
+		_ = d.emit(StreamEvent{Type: StreamError, Error: truncMsg})
+		return &UpstreamStreamError{Cause: errors.New(truncMsg)}
 	}
-	return d.emit(StreamEvent{Type: StreamMessageStop})
+	if err := d.emit(StreamEvent{Type: StreamMessageStop}); err != nil {
+		return err
+	}
+	if empty {
+		return &UpstreamStreamError{Cause: errors.New("upstream returned an empty stream (no SSE data)")}
+	}
+	return nil
 }
 
 func usageFromOpenAI(u *struct {

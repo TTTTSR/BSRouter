@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
 )
 
 // RewriteSSEModel 透传上游 SSE 流到 w,仅改写各格式事件中的 model 字段为 fullModel:
@@ -18,22 +21,30 @@ import (
 func RewriteSSEModel(w io.Writer, r io.Reader, format, fullModel string) error {
 	br := bufio.NewReader(r)
 	var event [][]byte // 当前事件的原始行(不含行尾换行)
+	// terminalSeen 记录是否见过该格式的流终止标记(completion=[DONE]/finish_reason、
+	// anthropic=message_stop、responses=response.completed 等);EOF 未见则判定流被截断。
+	terminalSeen := false
 
 	flush := func() error {
 		if len(event) == 0 {
 			return nil
 		}
-		// 找出 data: 行,按 SSE 规范以单个 LF 连接。
+		// 找出 data: 行,按 SSE 规范以单个 LF 连接;同时取 event: 行的事件名(供终止判定)。
 		var dataParts [][]byte
-		hasData := false
+		var eventName string
 		for _, line := range event {
 			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				hasData = true
+			switch {
+			case bytes.HasPrefix(trimmed, []byte("data:")):
 				dataParts = append(dataParts, bytes.TrimSpace(trimmed[len("data:"):]))
+			case bytes.HasPrefix(trimmed, []byte("event:")):
+				eventName = strings.TrimSpace(string(trimmed[len("event:"):]))
 			}
 		}
-		if hasData {
+		if sseTerminal(eventName, bytes.Join(dataParts, []byte("\n")), format) {
+			terminalSeen = true
+		}
+		if len(dataParts) > 0 {
 			if rewritten := rewriteSSEJSON(bytes.Join(dataParts, []byte("\n")), format, fullModel); rewritten != nil {
 				// 改写命中:保留 event:/id:/注释 等非 data 行,替换为单条 data 行。
 				for _, line := range event {
@@ -107,10 +118,72 @@ func RewriteSSEModel(w io.Writer, r io.Reader, format, fullModel string) error {
 		}
 		if err != nil {
 			if err == io.EOF {
-				return flush()
+				if ferr := flush(); ferr != nil {
+					return ferr
+				}
+				if !terminalSeen {
+					// 流被截断:未收到该格式的终止标记。追加一条错误帧让客户端知情,
+					// 并返回 UpstreamStreamError 供请求日志记录。
+					appendErrorFrame(w, format)
+					return &UpstreamStreamError{Cause: errors.New("upstream stream ended unexpectedly (missing terminal event)")}
+				}
+				return nil
 			}
-			return err
+			// 非 EOF 读错误(连接重置/超时):视为上游失败。
+			return &UpstreamStreamError{Cause: err}
 		}
+	}
+}
+
+// sseTerminal 报告一条上游 SSE 事件是否是该格式的流终止标记。
+// completion 还识别 finish_reason 非 null(许多上游不发 [DONE] 只发 finish_reason,不能误判)。
+func sseTerminal(event string, data []byte, format string) bool {
+	switch format {
+	case FormatCompletion:
+		if strings.TrimSpace(string(data)) == "[DONE]" {
+			return true
+		}
+		var obj struct {
+			Choices []struct {
+				FinishReason any `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(data, &obj) == nil {
+			for _, c := range obj.Choices {
+				if c.FinishReason != nil {
+					return true
+				}
+			}
+		}
+		return false
+	case FormatAnthropic:
+		return strings.TrimSpace(event) == "message_stop"
+	case FormatResponses:
+		var obj struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &obj) == nil {
+			switch obj.Type {
+			case "response.completed", "response.failed", "response.incomplete":
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// appendErrorFrame 按格式向客户端追加一条"流被截断"的 SSE 错误帧(仅截断时发生,
+// 不改写已透传字节)。写失败(客户端已断开)忽略——返回的 UpstreamStreamError 已够日志记录。
+func appendErrorFrame(w io.Writer, format string) {
+	const msg = "upstream stream ended unexpectedly"
+	switch format {
+	case FormatCompletion:
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":%q}}\n\n", msg)
+	case FormatAnthropic:
+		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":%q}}\n\n", msg)
+	case FormatResponses:
+		fmt.Fprintf(w, "data: {\"type\":\"error\",\"code\":\"stream_error\",\"message\":%q}\n\n", msg)
 	}
 }
 

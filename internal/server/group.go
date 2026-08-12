@@ -298,10 +298,9 @@ func (s *Server) serveGroupStream(w http.ResponseWriter, r *http.Request, g grou
 		rec = rv
 		out = newCaptureWriter(w) // 记录转换后回客户端的 SSE 前段
 	}
-	if err := s.writeSSE(out, clientFormat, upFormat, fullModel, body); err != nil {
-		if rec != nil && r.Context().Err() == nil {
-			rec.error = captureBody(err.Error(), "")
-		}
+	if err := s.writeSSE(out, rec, clientFormat, upFormat, fullModel, body); err != nil {
+		// 客户端未断开记一切错误;客户端已断开仅记源于上游的错误(截断/读体失败)。
+		recordStreamError(rec, r.Context(), err)
 	}
 	if rec != nil {
 		rec.convertedResponseBody = captureBody(string(out.(*captureWriter).buf), "")
