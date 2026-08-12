@@ -158,8 +158,16 @@ function Start-Bsr {
     }
     Save-Args -GArgs $GArgs
 
-    $p = Start-Process -FilePath $Gateway -ArgumentList $GArgs -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog
+    # Start-Process rejects an empty -ArgumentList; omit the key when there are no args.
+    $startParams = @{
+        FilePath               = $Gateway
+        WindowStyle            = 'Hidden'
+        PassThru               = $true
+        RedirectStandardOutput = $StdoutLog
+        RedirectStandardError  = $StderrLog
+    }
+    if ($GArgs -and $GArgs.Count -gt 0) { $startParams['ArgumentList'] = $GArgs }
+    $p = Start-Process @startParams
     $newPid = $p.Id
     Set-Content -LiteralPath $PidFile -Value $newPid -Encoding UTF8
 
