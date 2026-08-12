@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -100,7 +101,7 @@ func TestLoggerRecent(t *testing.T) {
 		l.Log(Entry{Timestamp: fmt.Sprintf("t%d", i), Method: "GET", Path: fmt.Sprintf("/p%d", i), Status: 200})
 	}
 
-	entries, err := l.Recent(3)
+	entries, err := l.Recent(3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,5 +111,47 @@ func TestLoggerRecent(t *testing.T) {
 	// 最新的在前。
 	if entries[0].Path != "/p4" || entries[2].Path != "/p2" {
 		t.Errorf("recent order = %+v", entries)
+	}
+}
+
+// Recent 带过滤:只返回满足条件的行(最新在前);管理端点的日志可据此从列表剔除。
+func TestLoggerRecentFiltered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	l, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	// 交替写入 /api 与 /manage 日志,API 数量不足 n 时应扩大窗口找全。
+	for i := 0; i < 6; i++ {
+		l.Log(Entry{Timestamp: fmt.Sprintf("t%d", i), Method: "GET", Path: fmt.Sprintf("/api/p%d", i), Status: 200})
+		l.Log(Entry{Timestamp: fmt.Sprintf("m%d", i), Method: "GET", Path: fmt.Sprintf("/manage/m%d", i), Status: 200})
+	}
+
+	keepAPI := func(e Entry) bool { return strings.HasPrefix(e.Path, "/api") }
+	entries, err := l.Recent(10, keepAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 6 {
+		t.Fatalf("entries = %d, want 6 (all /api lines)", len(entries))
+	}
+	// 最新在前,且都是 /api 路径。
+	if entries[0].Path != "/api/p5" {
+		t.Errorf("newest entry = %q, want /api/p5", entries[0].Path)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Path, "/api") {
+			t.Errorf("entry leaked non-api path: %s", e.Path)
+		}
+	}
+
+	// 截断请求:只返回最近 2 条 API 日志(跳过中间的 /manage)。
+	entries2, err := l.Recent(2, keepAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries2) != 2 || entries2[0].Path != "/api/p5" || entries2[1].Path != "/api/p4" {
+		t.Errorf("filtered top-2 = %+v", entries2)
 	}
 }

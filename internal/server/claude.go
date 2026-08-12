@@ -94,14 +94,15 @@ func (s *Server) handleDeleteClaudePreset(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// claudeDefaultKeyName 是网关为 Claude 预设自动生成的默认受管 key 名称。
+// claudeDefaultKeyName 是网关为 Claude/Codex 预设自动生成的默认受管 key 名称。
 const claudeDefaultKeyName = "claude-default"
 
-// claudeDefaultKey 返回 Claude 命令的默认鉴权 key,供未配置密钥的预设使用:
-// 优先复用/生成受管 key claudeDefaultKeyName(在 /api 上被接受);
-// 未启用受管 key 时回退网关 key;两者都不可用返回空(/api 完全开放,命令无需鉴权)。
-// 懒生成:首次调用时创建并持久化到 keys.json,对客户端透明。
-func (s *Server) claudeDefaultKey() string {
+// gatewayDefaultKey 返回预设命令的默认鉴权 key,供未配置密钥的预设
+// (Claude Code / OpenAI Codex)共用:优先复用/生成受管 key claudeDefaultKeyName
+// (在 /api 上被接受);未启用受管 key 时回退网关 key;两者都不可用返回空
+// (/api 完全开放,命令无需鉴权)。懒生成:首次调用时创建并持久化到 keys.json,
+// 对客户端透明。
+func (s *Server) gatewayDefaultKey() string {
 	if s.keys != nil {
 		if k, err := s.keys.Get(claudeDefaultKeyName); err == nil {
 			return k.Key
@@ -141,10 +142,13 @@ func (s *Server) handleClaudePresetCommand(w http.ResponseWriter, r *http.Reques
 		warning = "当前为远程/NAT 部署且未配置出口地址,此命令可能无法从远端生效;请在 Claude 预设页填写出口 IP 与映射端口"
 	}
 	if cfg.APIKey == "" && cfg.AuthToken == "" {
-		if dk := s.claudeDefaultKey(); dk != "" {
+		if dk := s.gatewayDefaultKey(); dk != "" {
 			cfg.AuthToken = dk
 		}
 	}
+	// 按各模型配置的上下文窗口(k)自动追加 [Nk]/[1m] 后缀,使 Claude Code 的
+	// 上下文预算与上游模型真实窗口一致(未配置窗口的模型不加后缀,保持 200k 默认)。
+	cfg = s.syncClaudeContextWindow(cfg)
 	cmd := claude.BuildCommand(cfg)
 	out := map[string]any{
 		"name":       cfg.Name,
@@ -180,7 +184,7 @@ func (s *Server) handleApplyClaudePresetLocal(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if cfg.APIKey == "" && cfg.AuthToken == "" {
-		if dk := s.claudeDefaultKey(); dk != "" {
+		if dk := s.gatewayDefaultKey(); dk != "" {
 			cfg.AuthToken = dk
 		}
 	}
@@ -192,6 +196,8 @@ func (s *Server) handleApplyClaudePresetLocal(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// 与命令端点一致:同步上下文窗口后缀到 settings.json 的 env 块。
+	cfg = s.syncClaudeContextWindow(cfg)
 	if err := claude.ApplyToLocalSettings(path, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

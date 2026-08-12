@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
+import { maskKey } from '../lib/mask'
 import { Button, Empty, ErrorAlert, Field, Input } from '../components/ui'
 import { IconPlus, IconTrash } from '../lib/icons'
 import type { APIKeyEntry } from '../lib/types'
@@ -26,7 +27,7 @@ export default function ApiKeys() {
       const k = await api.generateKey(name)
       setNewKey(k)
       setName('')
-      setNotice('已生成,请立即复制并妥善保存(之后列表仍可查看)')
+      setNotice('已生成,请立即点击「复制」并妥善保存(完整 Key 不会再次完整展示)')
       reload()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -101,7 +102,7 @@ export default function ApiKeys() {
               <tbody>
                 <tr>
                   <td style={{ width: 80 }}><strong>{newKey.name}</strong></td>
-                  <td className="mono" style={{ wordBreak: 'break-all' }}>{newKey.key}</td>
+                  <td className="mono" style={{ wordBreak: 'break-all' }} title="完整密钥已隐藏,点击「复制」获取">{maskKey(newKey.key)}</td>
                   <td style={{ width: 70 }}>
                     <Button variant="secondary" onClick={() => void copy(newKey.key)}>复制</Button>
                   </td>
@@ -137,7 +138,7 @@ export default function ApiKeys() {
                 {data.map((k) => (
                   <tr key={k.name}>
                     <td><strong>{k.name}</strong></td>
-                    <td className="mono" style={{ wordBreak: 'break-all' }}>{k.key}</td>
+                    <td className="mono" style={{ wordBreak: 'break-all' }} title="完整密钥已隐藏,点击「复制」获取">{maskKey(k.key)}</td>
                     <td className="mono">{fmtTime(k.created_at)}</td>
                     <td className="actions">
                       <Button variant="ghost" onClick={() => void copy(k.key)}>复制</Button>

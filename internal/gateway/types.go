@@ -40,6 +40,9 @@ type Message struct {
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// Reasoning 是 assistant 消息的思考内容(deepseek thinking 模式的 reasoning_content)。
+	// 多轮对话中上游要求把历史 reasoning 原样回传,故在 canonical 层保留并在各格式间透传。
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // Usage 记录一次请求的 token 用量。缓存字段仅部分格式携带(Anthropic / 兼容上游),
@@ -62,6 +65,11 @@ type Request struct {
 	TopP        *float64  `json:"top_p,omitempty"`
 	Stop        []string  `json:"stop,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
+	// ReasoningEffort 是"启用思考"的档位名(如 low/medium/high/xhigh/max),空表示不启用。
+	// 各格式的思考启用参数形态不同(anthropic thinking.budget_tokens、completion
+	// reasoning_effort、responses reasoning.effort),经中间层归一化为统一的档位名,
+	// 跨格式转发时再映射回目标格式——否则思考启用参数在转换路径被丢弃,上游不会思考。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Response 是规范化响应(中间类型),三种接口格式共享。
@@ -71,4 +79,36 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	FinishReason string     `json:"finish_reason,omitempty"`
 	Usage        Usage      `json:"usage"`
+}
+
+// effortToBudget 把统一思考档位名映射为 Anthropic 的 thinking.budget_tokens。
+// 启发式取值,与 pi 的 thinkingBudgets 同量级;默认给中等预算。
+func effortToBudget(effort string) int {
+	switch effort {
+	case "low":
+		return 2048
+	case "medium":
+		return 4096
+	case "high":
+		return 8192
+	case "xhigh":
+		return 16384
+	case "max":
+		return 32768
+	default:
+		return 4096
+	}
+}
+
+// budgetToEffort 把 Anthropic 的 thinking.budget_tokens 映射为统一档位名。
+// 启发式:小预算(含 pi 默认 1024)视为中等思考,确保转发后仍启用思考。
+func budgetToEffort(budget int) string {
+	switch {
+	case budget >= 16384:
+		return "xhigh"
+	case budget >= 8192:
+		return "high"
+	default:
+		return "medium"
+	}
 }

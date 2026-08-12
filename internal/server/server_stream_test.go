@@ -242,3 +242,84 @@ func TestStreamUpstreamError(t *testing.T) {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+// 跨格式流式 + thinking:codex(responses 客户端)发流式请求 → completion 上游返回
+// reasoning_content(deepseek thinking),网关应把思考内容以 responses reasoning item
+// 输出给 codex;codex 回传 reasoning item 时,网关应转回 completion 的 reasoning_content
+// 发给上游(否则上游 400 "reasoning_content must be passed back")。
+func TestStreamResponsesToCompletionReasoning(t *testing.T) {
+	var gotUpstreamModel string
+	var gotUpstreamMsgs []gateway.CompletionMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body gateway.CompletionRequest
+		if err := decodeBody(r, &body); err != nil {
+			t.Errorf("decode upstream: %v", err)
+			return
+		}
+		gotUpstreamModel = body.Model
+		gotUpstreamMsgs = body.Messages
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w,
+			`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""},"finish_reason":null}]}`+"\n\n"+
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":null,"reasoning_content":"The user wants files."},"finish_reason":null}]}`+"\n\n"+
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"hi","reasoning_content":null},"finish_reason":null}]}`+"\n\n"+
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n"+
+				"data: [DONE]\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	m := newMgr(t)
+	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: upstream.URL, APIKey: "k", Models: []provider.ModelConfig{{Name: "deepseek-v4-flash"}}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(m).Handler())
+	t.Cleanup(srv.Close)
+
+	// codex 第一轮:responses 流式请求,无历史 reasoning。
+	reqBody := `{"model":"oa@deepseek-v4-flash","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]}]}`
+	resp, err := http.Post(srv.URL+"/api/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, got)
+	}
+	if !strings.Contains(string(got), `"type":"reasoning"`) || !strings.Contains(string(got), `"text":"The user wants files."`) {
+		t.Errorf("response missing reasoning item:\n%s", got)
+	}
+	if !strings.Contains(string(got), `"type":"output_text"`) || !strings.Contains(string(got), `"text":"hi"`) {
+		t.Errorf("response missing text output:\n%s", got)
+	}
+
+	// codex 第二轮:回传历史 reasoning item + assistant 消息,上游应收到 reasoning_content。
+	gotUpstreamMsgs = nil
+	reqBody2 := `{"model":"oa@deepseek-v4-flash","stream":true,"input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]},` +
+		`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"The user wants files."}]},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`
+	resp2, err := http.Post(srv.URL+"/api/v1/responses", "application/json", strings.NewReader(reqBody2))
+	if err != nil {
+		t.Fatalf("POST 2: %v", err)
+	}
+	got2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status 2 = %d, want 200; body=%s", resp2.StatusCode, got2)
+	}
+	// 上游收到裸模型名 + reasoning 与 assistant 合并为一条(思考 + 文本同消息,
+	// thinking 上游要求 reasoning_content 与 content 配对)。
+	if gotUpstreamModel != "deepseek-v4-flash" {
+		t.Errorf("upstream model = %q, want deepseek-v4-flash", gotUpstreamModel)
+	}
+	var sawMerged bool
+	for _, mm := range gotUpstreamMsgs {
+		if mm.Role == "assistant" && mm.ReasoningContent != nil && *mm.ReasoningContent == "The user wants files." && mm.Content == "hi" {
+			sawMerged = true
+		}
+	}
+	if !sawMerged {
+		t.Errorf("upstream should receive reasoning_content + content on SAME assistant message: %+v", gotUpstreamMsgs)
+	}
+}

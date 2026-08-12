@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"BSRouter/internal/group"
+	"BSRouter/internal/provider"
 )
 
 // newAuthServer 构造启用 API Key 鉴权的网关测试服务。
@@ -48,14 +51,14 @@ func TestAPIKeyAuthRequired(t *testing.T) {
 		hdrs               map[string]string
 		want               int
 	}{
-		{"no key models", http.MethodGet, "/api/v1/models", nil, http.StatusUnauthorized},
+		// 模型列表端点已公开(见 TestPublicModelLists),鉴权用例改用其余受保护端点。
 		{"no key providers", http.MethodGet, "/manage/v1/providers", nil, http.StatusUnauthorized},
-		{"empty bearer header", http.MethodGet, "/api/v1/models", map[string]string{"Authorization": "Bearer "}, http.StatusUnauthorized},
-		{"wrong key", http.MethodGet, "/api/v1/models", map[string]string{"Authorization": "Bearer wrong"}, http.StatusUnauthorized},
+		{"empty bearer header", http.MethodGet, "/manage/v1/providers", map[string]string{"Authorization": "Bearer "}, http.StatusUnauthorized},
+		{"wrong key", http.MethodGet, "/manage/v1/providers", map[string]string{"Authorization": "Bearer wrong"}, http.StatusUnauthorized},
 		{"no key forward", http.MethodPost, "/api/v1/chat/completions", nil, http.StatusUnauthorized},
 		{"no key management write", http.MethodPost, "/manage/v1/providers", nil, http.StatusUnauthorized},
-		{"bearer ok", http.MethodGet, "/api/v1/models", map[string]string{"Authorization": "Bearer topsecret"}, http.StatusOK},
-		{"x-api-key ok", http.MethodGet, "/api/v1/models", map[string]string{"x-api-key": "topsecret"}, http.StatusOK},
+		{"bearer ok", http.MethodGet, "/manage/v1/providers", map[string]string{"Authorization": "Bearer topsecret"}, http.StatusOK},
+		{"x-api-key ok", http.MethodGet, "/manage/v1/providers", map[string]string{"x-api-key": "topsecret"}, http.StatusOK},
 		// 鉴权通过后按业务逻辑继续:未注册供应商 -> 404。
 		{"bearer ok forward", http.MethodPost, "/api/v1/chat/completions", map[string]string{"Authorization": "Bearer topsecret"}, http.StatusNotFound},
 	}
@@ -71,6 +74,63 @@ func TestAPIKeyAuthRequired(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// 模型列表端点公开:统一 API(/api/v1/models)、管理端同源(/manage/v1/models)
+// 与分组虚拟供应商({分组URL}/v1/models)均无需鉴权,无 key 或错误 key 都返回
+// 200;其余 /api 与 /manage 端点仍强制鉴权。
+func TestPublicModelLists(t *testing.T) {
+	m := newMgr(t)
+	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: "http://o", Models: []provider.ModelConfig{{Name: "gpt-4o"}}}); err != nil {
+		t.Fatal(err)
+	}
+	gm := newGroupMgr(t)
+	if err := gm.Add(group.Config{Name: "team-a", Kind: provider.KindCompletion, Models: []string{"oa@gpt-4o"}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(m).WithAPIKey("topsecret").WithGroups(gm).Handler())
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{"/api/v1/models", "/manage/v1/models", "/api/team-a/v1/models"} {
+		// 无 key。
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("public %s without key status = %d, want 200", path, resp.StatusCode)
+		}
+		// 错误 key 同样放行(公开端点不校验)。
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer wrong")
+		resp2, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Errorf("public %s with wrong key status = %d, want 200", path, resp2.StatusCode)
+		}
+	}
+
+	// 其余端点仍强制鉴权:管理读接口、统一 API 与分组转发写接口。
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/manage/v1/providers"},
+		{http.MethodPost, "/api/v1/chat/completions"},
+		{http.MethodPost, "/api/team-a/v1/chat/completions"},
+	} {
+		req, _ := http.NewRequest(c.method, srv.URL+c.path, strings.NewReader(`{"model":"x","messages":[]}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s without key status = %d, want 401", c.method, c.path, resp.StatusCode)
+		}
 	}
 }
 

@@ -39,16 +39,28 @@ function Row({ e }: { e: LogEntry }) {
           <td colSpan={9} className="log-detail">
             {e.error ? <div className="error-text">错误: {e.error}</div> : null}
             {e.forward_url ? <div>转发地址: {e.forward_url}</div> : null}
+            {e.request_body ? (
+              <>
+                <div>原始请求体(转换前):</div>
+                <pre>{e.request_body}</pre>
+              </>
+            ) : null}
             {e.forward_request ? (
               <>
-                <div>转发请求:</div>
+                <div>转换后请求体(发给上游):</div>
                 <pre>{e.forward_request}</pre>
               </>
             ) : null}
             {e.forward_response ? (
               <>
-                <div>转发响应:</div>
+                <div>上游响应体:</div>
                 <pre>{e.forward_response}</pre>
+              </>
+            ) : null}
+            {e.converted_response_body ? (
+              <>
+                <div>转换后响应体(回客户端):</div>
+                <pre>{e.converted_response_body}</pre>
               </>
             ) : null}
             {e.request_id ? <div className="faint">request_id: {e.request_id} · remote: {e.remote_addr ?? '-'}</div> : null}
@@ -64,6 +76,24 @@ export default function Logs() {
   const { data, error, loading, reload } = useAsync(() => api.listLogs(limit))
   const entries = data ?? []
   const [auto, setAuto] = useState(false)
+  const [detail, setDetail] = useState<'default' | 'full' | ''>('')
+  // 当前日志文件名(每次运行默认以启动时间戳命名)。
+  const logFile = useAsync(() => api.logFile())
+  const fileName = logFile.data?.path ? logFile.data.path.split(/[\\/]/).pop() ?? '' : ''
+
+  // 初始读取完整度;切换时 PUT 并本地更新。
+  useEffect(() => {
+    api.logDetail().then((d) => setDetail(d.detail)).catch(() => {})
+  }, [])
+
+  async function changeDetail(d: 'default' | 'full') {
+    try {
+      await api.setLogDetail(d)
+      setDetail(d)
+    } catch {
+      setDetail(detail) // 失败回滚
+    }
+  }
 
   // 自动刷新:每 5 秒拉取一次。
   useEffect(() => {
@@ -83,9 +113,21 @@ export default function Logs() {
       <div className="page-head">
         <div>
           <div className="page-title">日志查看</div>
-          <div className="page-sub">网关请求访问日志(JSONL),点击行可展开转发详情</div>
+          <div className="page-sub">
+            {fileName
+              ? `网关 API 请求访问日志(JSONL,不含管理接口) · 当前文件: ${fileName}`
+              : '网关 API 请求访问日志(JSONL,不含管理接口)'}
+          </div>
         </div>
         <div className="toolbar">
+          <Select
+            value={detail || 'default'}
+            onChange={(e) => void changeDetail(e.target.value as 'default' | 'full')}
+            title="日志完整度:完整模式记录全部请求的请求/响应体;默认模式仅出错时记录"
+          >
+            <option value="default">完整度:默认(出错才记详情)</option>
+            <option value="full">完整度:完整(全部记录详情)</option>
+          </Select>
           <Select
             value={String(limit)}
             onChange={(e) => {

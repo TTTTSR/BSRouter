@@ -1,11 +1,14 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"BSRouter/internal/gateway"
@@ -31,6 +34,7 @@ func TestConfigValidate(t *testing.T) {
 		{"invalid model kind", Config{Kind: KindAnthropic, Name: "a", BaseURL: "http://a", Models: []ModelConfig{{Name: "x", Kind: "nope"}}}, false},
 		{"duplicate model", Config{Kind: KindAnthropic, Name: "a", BaseURL: "http://a", Models: []ModelConfig{{Name: "x"}, {Name: "x"}}}, false},
 		{"slash in name", Config{Kind: KindAnthropic, Name: "a/b", BaseURL: "http://a"}, false},
+		{"negative context window", Config{Kind: KindAnthropic, Name: "a", BaseURL: "http://a", Models: []ModelConfig{{Name: "x", ContextWindow: -1}}}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -157,5 +161,124 @@ func TestConfigLegacyModelsFormat(t *testing.T) {
 	}
 	if c2.Models[0].Kind != KindAnthropic {
 		t.Errorf("kind = %q, want anthropic", c2.Models[0].Kind)
+	}
+}
+
+// 模型的 context_window 字段(k 为单位)应随对象形式反序列化并被写回。
+func TestModelConfigContextWindow(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(`{"kind":"completion","name":"a","base_url":"http://a",`+
+		`"models":[{"name":"deepseek-v4-flash","context_window":128},{"name":"plain"}]}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(c.Models) != 2 || c.Models[0].ContextWindow != 128 || c.Models[1].ContextWindow != 0 {
+		t.Errorf("models = %+v", c.Models)
+	}
+	// 写回 JSON 应带出 context_window(omitempty,0 不输出)。
+	out, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"context_window":128`) || strings.Count(string(out), "context_window") != 1 {
+		t.Errorf("marshal = %s", out)
+	}
+	// 旧字符串形式仍兼容且窗口为零。
+	var legacy Config
+	if err := json.Unmarshal([]byte(`{"kind":"completion","name":"a","base_url":"http://a","models":["gpt-4o"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Models[0].Name != "gpt-4o" || legacy.Models[0].ContextWindow != 0 {
+		t.Errorf("legacy models = %+v", legacy.Models)
+	}
+}
+
+// 模型可配置多个支持的接口格式(kinds);Kinds 优先于旧 Kind 字段,并做去重。
+func TestModelKinds(t *testing.T) {
+	p, err := New(Config{
+		Kind:    KindCompletion,
+		Name:    "p",
+		BaseURL: "http://up",
+		APIKey:  "k",
+		Models: []ModelConfig{
+			{Name: "multi", Kinds: []Kind{KindAnthropic, KindResponses, KindAnthropic}}, // 去重
+			{Name: "single", Kind: KindAnthropic},                                        // 旧单格式
+			{Name: "inherit"},                                                            // 无覆盖
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.ModelKinds("multi"); len(got) != 2 || got[0] != KindAnthropic || got[1] != KindResponses {
+		t.Errorf("multi kinds = %v, want [anthropic responses] (dedup)", got)
+	}
+	if got := p.ModelKinds("single"); len(got) != 1 || got[0] != KindAnthropic {
+		t.Errorf("single kinds = %v, want [anthropic]", got)
+	}
+	if got := p.ModelKinds("inherit"); len(got) != 1 || got[0] != KindCompletion {
+		t.Errorf("inherit kinds = %v, want [completion] (provider default)", got)
+	}
+	// ModelKind = ModelKinds 首位(转换路径选上游格式)。
+	if p.ModelKind("multi") != KindAnthropic {
+		t.Errorf("ModelKind(multi) = %q, want anthropic (first)", p.ModelKind("multi"))
+	}
+	// Supports 判定。
+	if !p.Supports("multi", KindAnthropic) || !p.Supports("multi", KindResponses) {
+		t.Error("multi should support anthropic and responses")
+	}
+	if p.Supports("multi", KindCompletion) {
+		t.Error("multi should NOT support completion")
+	}
+	if !p.Supports("single", KindAnthropic) || p.Supports("single", KindCompletion) {
+		t.Error("single should support only anthropic")
+	}
+	if !p.Supports("inherit", KindCompletion) || p.Supports("inherit", KindAnthropic) {
+		t.Error("inherit should support only completion (default)")
+	}
+}
+
+// 配置校验:kinds 中非法格式应被拒绝;Kinds 与 Kind 可共存(Kinds 优先)。
+func TestConfigValidateKinds(t *testing.T) {
+	ok := Config{Kind: KindCompletion, Name: "a", BaseURL: "http://a", Models: []ModelConfig{
+		{Name: "x", Kinds: []Kind{KindAnthropic, KindCompletion}},
+		{Name: "y", Kind: KindAnthropic, Kinds: []Kind{KindCompletion}}, // Kinds 优先,Kind 被忽略
+	}}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("Validate(ok) err = %v, want nil", err)
+	}
+	bad := Config{Kind: KindCompletion, Name: "a", BaseURL: "http://a", Models: []ModelConfig{
+		{Name: "x", Kinds: []Kind{KindAnthropic, "nope"}},
+	}}
+	if err := bad.Validate(); err == nil {
+		t.Error("Validate(bad kinds) err = nil, want error")
+	}
+}
+
+// 直通原始转发:completion 格式按原样转发,上游收到的请求体与客户端一致(除 model 改写由上层做)。
+func TestProviderCompleteRaw(t *testing.T) {
+	var gotBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"raw"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer up.Close()
+
+	p, err := New(Config{Kind: KindCompletion, Name: "p", BaseURL: up.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	status, body, err := p.CompleteRaw(context.Background(), KindCompletion, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if string(gotBody) != string(raw) {
+		t.Errorf("upstream got body = %s, want %s (raw passthrough)", gotBody, raw)
+	}
+	if string(body) == "" || !bytes.Contains(body, []byte(`"raw"`)) {
+		t.Errorf("response body = %s", body)
 	}
 }

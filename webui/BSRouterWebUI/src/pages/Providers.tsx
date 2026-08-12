@@ -35,7 +35,7 @@ function ProviderFormModal({
     setBusy(true)
     const cfg: ProviderConfig = {
       kind, name: name.trim(), base_url: baseUrl.trim(), api_key: apiKey.trim(),
-      models: models.map((m) => ({ name: m.name.trim(), kind: m.kind })),
+      models: models.map((m) => ({ name: m.name.trim(), kind: m.kind, kinds: m.kinds, context_window: m.context_window })),
       usage_url: usageUrl.trim(), models_url: modelsUrl.trim(),
     }
     try {
@@ -61,8 +61,12 @@ function ProviderFormModal({
       const r = await api.fetchModels({
         name: name.trim(), kind, base_url: baseUrl.trim(), api_key: apiKey.trim(), models_url: modelsUrl.trim(),
       })
-      // 拉取到的模型使用供应商默认接口格式(模型级 Kind 留空)。
-      setModels(r.models.map((m) => ({ name: m, kind: '' })))
+      // 拉取到的模型使用供应商默认接口格式(模型级 Kind 留空);已存在的模型保留
+      // 其上下文窗口配置,避免一次拉取清空手工填写的窗口。
+      const existingWindow = new Map(
+        models.filter((m) => m.context_window != null && m.context_window > 0)
+          .map((m) => [m.name, m.context_window]))
+      setModels(r.models.map((m) => ({ name: m, kind: '', context_window: existingWindow.get(m) })))
     } catch (e) {
       setFetchErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -100,7 +104,7 @@ function ProviderFormModal({
         <Field label="API Key" hint={editing ? '留空表示保留原密钥' : undefined}>
           <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={editing ? '(保留原密钥)' : 'sk-...'} />
         </Field>
-        <Field label="模型列表" hint="每个模型一行;接口格式留空则使用供应商默认" className="span2">
+        <Field label="模型列表" hint="每个模型一行;接口格式留空则使用供应商默认;窗口(k)留空默认 200k" className="span2">
           <ModelRows models={models} onChange={setModels} />
         </Field>
         <Field label="用量查询 URL(可选)">
@@ -123,28 +127,76 @@ function ProviderFormModal({
   )
 }
 
-// 接口格式下拉:默认(留空=供应商默认)/ anthropic / completion / responses。
-function KindSelect({ value, onChange }: { value: Kind | ''; onChange: (k: Kind | '') => void }) {
+// 模型支持的接口格式多选:勾选任意格式则该模型支持这些格式(可多选);全部不勾 =
+// 继承供应商默认接口格式。
+function KindCheckboxes({ value, onChange }: { value: Kind[]; onChange: (kinds: Kind[]) => void }) {
+  function toggle(k: Kind) {
+    if (value.includes(k)) {
+      onChange(value.filter((x) => x !== k))
+    } else {
+      onChange([...value, k])
+    }
+  }
   return (
-    <Select value={value} onChange={(e) => onChange(e.target.value as Kind | '')}>
-      <option value="">默认</option>
+    <div className="kind-checkboxes">
       {KINDS.map((k) => (
-        <option key={k} value={k}>{KINDS_LABEL[k]}</option>
+        <label key={k} className={`kind-check${value.includes(k) ? ' on' : ''}`}>
+          <input type="checkbox" checked={value.includes(k)} onChange={() => toggle(k)} />
+          <span>{KINDS_LABEL[k]}</span>
+        </label>
       ))}
-    </Select>
+      <span className={`kind-inherit${value.length === 0 ? ' on' : ''}`}>继承默认</span>
+    </div>
   )
 }
 
-// 模型按行编辑:每行 = 模型名 + 接口格式下拉(留空=供应商默认)。
+// 从旧配置(kind 单格式)与新配置(kinds 多格式)推导当前选中格式。
+function modelKinds(m: ModelConfig): Kind[] {
+  if (m.kinds && m.kinds.length > 0) return m.kinds
+  if (m.kind) return [m.kind as Kind]
+  return []
+}
+
+// 解析上下文窗口输入(k):空串 → 未设置(默认 200k);非法/负数/非整数 → 未设置。
+function parseWindow(v: string): number | undefined {
+  const t = v.trim()
+  if (t === '') return undefined
+  const n = Number(t)
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 0 ? n : undefined
+}
+
+// 上下文窗口数字输入(k 为单位,留空默认 200k)。
+function WindowInput({ value, onChange }: { value?: number; onChange: (v?: number) => void }) {
+  return (
+    <Input
+      type="number"
+      min={0}
+      className="model-window"
+      value={value ?? ''}
+      placeholder="200"
+      title="上下文窗口(k),留空默认 200k"
+      onChange={(e) => onChange(parseWindow(e.target.value))}
+    />
+  )
+}
+
+// 模型按行编辑:每行 = 模型名 + 上下文窗口 + 支持的接口格式多选(全不勾=供应商默认)。
 function ModelRows({ models, onChange }: { models: ModelConfig[]; onChange: (v: ModelConfig[]) => void }) {
   const [draft, setDraft] = useState('')
-  const [draftKind, setDraftKind] = useState<Kind | ''>('')
+  const [draftKinds, setDraftKinds] = useState<Kind[]>([])
+  const [draftWindow, setDraftWindow] = useState('')
+
+  function update(i: number, m: ModelConfig) {
+    onChange(models.map((x, idx) => (idx === i ? m : x)))
+  }
 
   function add() {
     const name = draft.trim()
     if (name === '' || models.some((m) => m.name === name)) return
-    onChange([...models, { name, kind: draftKind }])
+    onChange([...models, { name, kinds: draftKinds.length > 0 ? draftKinds : undefined, context_window: parseWindow(draftWindow) }])
     setDraft('')
+    setDraftKinds([])
+    setDraftWindow('')
   }
 
   return (
@@ -154,11 +206,12 @@ function ModelRows({ models, onChange }: { models: ModelConfig[]; onChange: (v: 
           <Input
             value={m.name}
             placeholder="模型名,如 gpt-4o"
-            onChange={(e) => onChange(models.map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)))}
+            onChange={(e) => update(i, { ...m, name: e.target.value })}
           />
-          <KindSelect
-            value={m.kind ?? ''}
-            onChange={(k) => onChange(models.map((x, idx) => (idx === i ? { ...x, kind: k } : x)))}
+          <WindowInput value={m.context_window} onChange={(v) => update(i, { ...m, context_window: v })} />
+          <KindCheckboxes
+            value={modelKinds(m)}
+            onChange={(kinds) => update(i, { ...m, kind: undefined, kinds: kinds.length > 0 ? kinds : undefined })}
           />
           <Button variant="ghost" className="icon-btn" title="移除" onClick={() => onChange(models.filter((_, idx) => idx !== i))}>
             <IconTrash />
@@ -177,7 +230,8 @@ function ModelRows({ models, onChange }: { models: ModelConfig[]; onChange: (v: 
             }
           }}
         />
-        <KindSelect value={draftKind} onChange={setDraftKind} />
+        <WindowInput value={parseWindow(draftWindow)} onChange={(v) => setDraftWindow(v === undefined ? '' : String(v))} />
+        <KindCheckboxes value={draftKinds} onChange={setDraftKinds} />
         <Button variant="secondary" onClick={add} disabled={draft.trim() === ''}>添加</Button>
       </div>
     </div>

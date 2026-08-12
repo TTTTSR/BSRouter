@@ -17,16 +17,19 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"BSRouter/internal/aggregate"
 	"BSRouter/internal/apikey"
 	"BSRouter/internal/claude"
+	"BSRouter/internal/codex"
 	"BSRouter/internal/gateway"
 	"BSRouter/internal/group"
 	"BSRouter/internal/logger"
@@ -43,13 +46,31 @@ type Server struct {
 	groups     *group.Manager
 	keys       *apikey.Manager
 	presets    *claude.Manager
+	codex      *codex.Manager
 	aggregates *aggregate.Manager
 	apiKey     string
 	log        *logger.Logger
 	webUI      http.Handler
+	// logDetail 日志完整度:"default" 仅出错时记录完整转发详情;"full" 全部记录。
+	// logDetailMu 保护运行时经管理端点修改;logDetailPath 持久化文件(可选)。
+	logDetail     string
+	logDetailMu   sync.RWMutex
+	logDetailPath string
 	// claudeSettingsPath 覆盖本地 Claude Code 配置的目标 settings.json 路径;
 	// 留空时用 ~/.claude/settings.json(仅测试/自定义使用)。
 	claudeSettingsPath string
+	// codexConfigPath 覆盖本地 Codex 配置的目标 config.toml 路径;
+	// 留空时用 ~/.codex/config.toml(仅测试/自定义使用)。
+	codexConfigPath string
+	// codexAuthPath 覆盖本地 Codex 鉴权文件的目标 auth.json 路径;
+	// 留空时用 ~/.codex/auth.json(仅测试/自定义使用)。
+	codexAuthPath string
+	// codexModelCatalogPath 覆盖本地 Codex 模型目录文件的目标路径;
+	// 留空时用 ~/.codex/bsrouter-models.json(仅测试/自定义使用)。
+	codexModelCatalogPath string
+	// codexModelsCachePath 覆盖本地 Codex 模型缓存文件的目标路径;
+	// 留空时用 ~/.codex/models_cache.json(桌面 app 的模型列表来源)。
+	codexModelsCachePath string
 	// deployment 部署形态(由 cmd/gateway 启动时判定);netm 是出口地址配置。
 	deployment *Deployment
 	netm       *network.Manager
@@ -82,6 +103,23 @@ func (s *Server) WithLogger(l *logger.Logger) *Server {
 	return s
 }
 
+// WithLogDetail 设置日志完整度(启动默认值):"default" 仅出错记录完整转发详情,
+// "full" 全部记录。管理端点可运行时修改并持久化。
+func (s *Server) WithLogDetail(detail string) *Server {
+	if detail == LogDetailFull {
+		s.logDetail = LogDetailFull
+	} else {
+		s.logDetail = LogDetailDefault
+	}
+	return s
+}
+
+// WithLogDetailPath 设置日志完整度持久化文件路径(管理端点 PUT 时写回)。
+func (s *Server) WithLogDetailPath(path string) *Server {
+	s.logDetailPath = path
+	return s
+}
+
 // WithAPIKeys 启用下游模型请求的受管 API Key 鉴权(/api 端点额外接受受管 Key)。
 // 需在 Handler() 之前调用。
 func (s *Server) WithAPIKeys(km *apikey.Manager) *Server {
@@ -96,6 +134,13 @@ func (s *Server) WithClaudePresets(cm *claude.Manager) *Server {
 	return s
 }
 
+// WithCodexPresets 启用 OpenAI Codex 配置预设管理(/manage/v1/codex-presets)。
+// 需在 Handler() 之前调用。
+func (s *Server) WithCodexPresets(cm *codex.Manager) *Server {
+	s.codex = cm
+	return s
+}
+
 // WithAggregates 启用聚合模型(自动聚合同名模型,裸名调用时轮询负载均衡)。
 // 需在 Handler() 之前调用。
 func (s *Server) WithAggregates(am *aggregate.Manager) *Server {
@@ -107,6 +152,34 @@ func (s *Server) WithAggregates(am *aggregate.Manager) *Server {
 // 留空时默认 ~/.claude/settings.json。仅测试与自定义场景使用。
 func (s *Server) WithClaudeSettingsPath(path string) *Server {
 	s.claudeSettingsPath = path
+	return s
+}
+
+// WithCodexConfigPath 指定"覆盖本地 Codex 配置"的目标 config.toml 路径。
+// 留空时默认 ~/.codex/config.toml。仅测试与自定义场景使用。
+func (s *Server) WithCodexConfigPath(path string) *Server {
+	s.codexConfigPath = path
+	return s
+}
+
+// WithCodexAuthPath 指定"覆盖本地 Codex 鉴权"的目标 auth.json 路径。
+// 留空时默认 ~/.codex/auth.json。仅测试与自定义场景使用。
+func (s *Server) WithCodexAuthPath(path string) *Server {
+	s.codexAuthPath = path
+	return s
+}
+
+// WithCodexModelCatalogPath 指定"覆盖本地 Codex 模型目录"的目标文件路径。
+// 留空时默认 ~/.codex/bsrouter-models.json。仅测试与自定义场景使用。
+func (s *Server) WithCodexModelCatalogPath(path string) *Server {
+	s.codexModelCatalogPath = path
+	return s
+}
+
+// WithCodexModelsCachePath 指定"覆盖本地 Codex 模型缓存"的目标文件路径。
+// 留空时默认 ~/.codex/models_cache.json(桌面 app 读此文件)。仅测试与自定义场景使用。
+func (s *Server) WithCodexModelsCachePath(path string) *Server {
+	s.codexModelsCachePath = path
 	return s
 }
 
@@ -146,6 +219,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /manage/v1/providers/{name}", s.handleGetProvider)
 	mux.HandleFunc("PUT /manage/v1/providers/{name}", s.handleUpdateProvider)
 	mux.HandleFunc("DELETE /manage/v1/providers/{name}", s.handleDeleteProvider)
+	// 单模型上下文窗口更新(供模型管理页行内编辑)。
+	mux.HandleFunc("PUT /manage/v1/providers/{name}/models/{model}", s.handleUpdateModelContextWindow)
 	// 供应商探测端点
 	mux.HandleFunc("POST /manage/v1/providers/{name}/ping", s.handlePingProvider)
 	mux.HandleFunc("POST /manage/v1/providers/{name}/sync-models", s.handleSyncModels)
@@ -160,8 +235,13 @@ func (s *Server) Handler() http.Handler {
 		// 分组虚拟供应商:/api/{分组URL}/v1/...(具体路由优先)。
 		mux.Handle("/api/", http.HandlerFunc(s.handleGroupURL))
 	}
-	// 日志查看端点
+	// 日志查看端点(列表 + 当前日志文件路径 + 完整度分级)
 	mux.HandleFunc("GET /manage/v1/logs", s.handleListLogs)
+	mux.HandleFunc("GET /manage/v1/logs/file", s.handleLogFile)
+	if s.log != nil {
+		mux.HandleFunc("GET /manage/v1/logs/detail", s.handleGetLogDetail)
+		mux.HandleFunc("PUT /manage/v1/logs/detail", s.handleSetLogDetail)
+	}
 	// 本地模式检测(前端据此启用本地配置覆盖功能)
 	mux.HandleFunc("GET /manage/v1/local", s.handleLocalStatus)
 	// 部署形态与出口地址(远程/NAT 部署下前端据此提醒填写出口 IP 与映射端口)
@@ -186,6 +266,17 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("DELETE /manage/v1/claude-presets/{name}", s.handleDeleteClaudePreset)
 		mux.HandleFunc("GET /manage/v1/claude-presets/{name}/command", s.handleClaudePresetCommand)
 		mux.HandleFunc("POST /manage/v1/claude-presets/{name}/apply-local", s.handleApplyClaudePresetLocal)
+	}
+	// OpenAI Codex 配置预设端点
+	if s.codex != nil {
+		mux.HandleFunc("POST /manage/v1/codex-presets", s.handleAddCodexPreset)
+		mux.HandleFunc("GET /manage/v1/codex-presets", s.handleListCodexPresets)
+		mux.HandleFunc("GET /manage/v1/codex-presets/{name}", s.handleGetCodexPreset)
+		mux.HandleFunc("PUT /manage/v1/codex-presets/{name}", s.handleUpdateCodexPreset)
+		mux.HandleFunc("DELETE /manage/v1/codex-presets/{name}", s.handleDeleteCodexPreset)
+		mux.HandleFunc("GET /manage/v1/codex-presets/{name}/command", s.handleCodexPresetCommand)
+		mux.HandleFunc("POST /manage/v1/codex-presets/{name}/apply-local", s.handleApplyCodexPresetLocal)
+		mux.HandleFunc("GET /manage/v1/codex-native-slugs", s.handleListCodexNativeSlugs)
 	}
 	// 聚合模型端点
 	if s.aggregates != nil {
@@ -222,6 +313,11 @@ func (s *Server) requireAPIKey(key string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// 模型列表端点公开(仅含模型 ID,无密钥),下游客户端免 key 即可发现可用模型。
+		if s.isPublicModelList(r, cleaned) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		got := apiKeyFromRequest(r)
 		valid := key != "" && constantTimeEqual(got, key)
 		if !valid && s.keys != nil && strings.HasPrefix(cleaned, "/api/") {
@@ -242,6 +338,28 @@ func (s *Server) requireAPIKey(key string, next http.Handler) http.Handler {
 func isAPIPath(p string) bool {
 	p = path.Clean(p)
 	return p == "/api" || p == "/manage" || strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/manage/")
+}
+
+// isPublicModelList 判断 GET 请求是否为公开的模型列表端点:统一 API 的
+// /api/v1/models、管理端同源 /manage/v1/models,以及各分组虚拟供应商的
+// {分组URL}/v1/models。模型列表只返回模型 ID(无密钥),公开以便下游客户端
+// 免 key 发现可用模型;鉴权仍覆盖其余全部 /api 与 /manage 端点。
+func (s *Server) isPublicModelList(r *http.Request, cleaned string) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch cleaned {
+	case "/api/v1/models", "/manage/v1/models":
+		return true
+	}
+	// 分组模型列表:URL 形如 {分组URL}/v1/models,经 ResolveURL 判定归属某个分组。
+	// 分组 URL 必然位于 /api 下且不占用 /api/v1 保留段,故 /api/v1/models 不会误配。
+	if s.groups != nil {
+		if _, rest, ok := s.groups.ResolveURL(cleaned); ok && rest == "/v1/models" {
+			return true
+		}
+	}
+	return false
 }
 
 // constantTimeEqual 以 SHA-256 摘要做常数时间比较:无论输入长度如何,比较的都是
@@ -273,15 +391,42 @@ const logCtxKey ctxKey = iota
 
 // logRecord 记录一次请求在转发过程中解析出的富化信息。
 type logRecord struct {
-	requestID       string
-	model           string
-	provider        string
-	kind            string
-	error           string
-	upstreamStatus  int
-	forwardURL      string
-	forwardRequest  string
-	forwardResponse string
+	requestID             string
+	model                 string
+	provider              string
+	kind                  string
+	error                 string
+	upstreamStatus        int
+	requestBody           string // 客户端原始请求体(仅转换路径)
+	forwardURL            string
+	forwardRequest        string // 发给上游(转换后的请求体)
+	forwardResponse       string // 上游返回(转换前/上游格式)
+	convertedResponseBody string // 转换后回客户端(仅转换路径)
+}
+
+// 日志完整度取值。
+const (
+	LogDetailDefault = "default"
+	LogDetailFull    = "full"
+)
+
+// logDetailOf 返回当前日志完整度(并发安全)。
+func (s *Server) logDetailOf() string {
+	s.logDetailMu.RLock()
+	defer s.logDetailMu.RUnlock()
+	if s.logDetail == LogDetailFull {
+		return LogDetailFull
+	}
+	return LogDetailDefault
+}
+
+// keepForwardDetail 判断该请求是否记录完整转发详情:
+// full 完整度总是记录;default 仅当出错(网关内部错误 / 供应商返回错误)时记录。
+func keepForwardDetail(s *Server, rec *logRecord, status int) bool {
+	if s.logDetailOf() == LogDetailFull {
+		return true
+	}
+	return rec.error != "" || status >= 400
 }
 
 // logMiddleware 记录所有 API 请求的访问日志(JSONL)。处于最外层,鉴权拒绝的请求也记录;
@@ -302,26 +447,33 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 				// handler panic 时 net/http 会回写 500,这里补齐对应日志。
 				rw.code = http.StatusInternalServerError
 			}
-			s.log.Log(logger.Entry{
-				Timestamp:       time.Now().Format(time.RFC3339Nano),
-				RequestID:       rec.requestID,
-				Method:          r.Method,
-				Path:            r.URL.Path,
-				Status:          rw.status(),
-				DurationMS:      time.Since(start).Milliseconds(),
-				RemoteAddr:      r.RemoteAddr,
-				UserAgent:       r.UserAgent(),
-				RequestBytes:    maxInt64(r.ContentLength, 0),
-				ResponseBytes:   rw.bytes,
-				Model:           rec.model,
-				Provider:        rec.provider,
-				Kind:            rec.kind,
-				UpstreamStatus:  rec.upstreamStatus,
-				Error:           rec.error,
-				ForwardURL:      rec.forwardURL,
-				ForwardRequest:  rec.forwardRequest,
-				ForwardResponse: rec.forwardResponse,
-			})
+			status := rw.status()
+			entry := logger.Entry{
+				Timestamp:      time.Now().Format(time.RFC3339Nano),
+				RequestID:      rec.requestID,
+				Method:         r.Method,
+				Path:           r.URL.Path,
+				Status:         status,
+				DurationMS:     time.Since(start).Milliseconds(),
+				RemoteAddr:     r.RemoteAddr,
+				UserAgent:      r.UserAgent(),
+				RequestBytes:   maxInt64(r.ContentLength, 0),
+				ResponseBytes:  rw.bytes,
+				Model:          rec.model,
+				Provider:       rec.provider,
+				Kind:           rec.kind,
+				UpstreamStatus: rec.upstreamStatus,
+				Error:          rec.error,
+			}
+			// 完整度分级:default 模式下正常请求只记简单信息,出错才带完整转发详情。
+			if keepForwardDetail(s, rec, status) {
+				entry.RequestBody = rec.requestBody
+				entry.ForwardURL = rec.forwardURL
+				entry.ForwardRequest = rec.forwardRequest
+				entry.ForwardResponse = rec.forwardResponse
+				entry.ConvertedResponseBody = rec.convertedResponseBody
+			}
+			s.log.Log(entry)
 		}()
 		next.ServeHTTP(rw, r.WithContext(ctx))
 		panicked = false
@@ -354,6 +506,54 @@ func (r *statusRecorder) status() int {
 		return http.StatusOK
 	}
 	return r.code
+}
+
+// captureWriter 包装 ResponseWriter,累计写入的前 maxForwardBody 字节
+// (供记录流式转换后回客户端的 SSE 前段;截断规则与 captureBody 对齐)。
+type captureWriter struct {
+	http.ResponseWriter
+	flusher http.Flusher
+	buf     []byte
+}
+
+func newCaptureWriter(w http.ResponseWriter) *captureWriter {
+	cw := &captureWriter{ResponseWriter: w}
+	if fl, ok := w.(http.Flusher); ok {
+		cw.flusher = fl
+	}
+	return cw
+}
+
+func (c *captureWriter) Write(p []byte) (int, error) {
+	if remain := maxForwardBody - len(c.buf); remain > 0 {
+		if len(p) < remain {
+			remain = len(p)
+		}
+		c.buf = append(c.buf, p[:remain]...)
+	}
+	return c.ResponseWriter.Write(p)
+}
+
+func (c *captureWriter) Flush() {
+	if c.flusher != nil {
+		c.flusher.Flush()
+	}
+}
+
+// writeConvertedJSON 编码响应体并写回客户端,同时把转换后的响应体记录到日志
+// (用于非流式转换路径的 converted_response_body)。
+func writeConvertedJSON(w http.ResponseWriter, status int, v any, rec *logRecord) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "encode response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rec != nil {
+		rec.convertedResponseBody = captureBody(string(data), "")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
 }
 
 func newRequestID() string {
@@ -406,60 +606,438 @@ func captureBody(s, key string) string {
 	return s
 }
 
+// ---- 直通转发 ----
+//
+// 直通是转发端点的前置分支:模型支持客户端请求的接口格式时,请求体不经中间层
+// (canonical)转换,原样转发到上游;响应同样原样回传,仅把 model 字段改写为客户端
+// 请求的完整模型名(用户要求所有情况下 model 都处理为正确内容)。不命中直通时,
+// handler 恢复原始 body 走现有转换路径(route/streamRoute,行为完全不变)。
+
+// maxErrBody 限制直通路径读取非 2xx 错误体的大小。
+const maxErrBody = 1 << 20 // 1 MB
+
+// readRawBody 读取原始请求体并限制大小(语义与 decodeJSON 一致:超大 413、其余 400)。
+// 同时把客户端原始请求体记入日志记录(直通路径随后清空;转换路径保留为 request_body)。
+func (s *Server) readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, err)
+		} else {
+			writeError(w, http.StatusBadRequest, err)
+		}
+		return nil, false
+	}
+	if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		rec.requestBody = captureBody(string(data), "")
+	}
+	return data, true
+}
+
+// metaModelStream 从原始请求体解析直通所需的顶层字段 {model, stream}(三格式同字段)。
+// 解析失败时写 400 并返回 nil。
+func (s *Server) metaModelStream(w http.ResponseWriter, raw []byte, label string) *struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+} {
+	var meta struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode %s: %w", label, err))
+		return nil
+	}
+	return &meta
+}
+
+// directTarget 是直通目标:单供应商(显式 @ 路由)或聚合(全部成员同格式)。
+type directTarget struct {
+	single  bool
+	p       provider.Provider
+	model   string   // 上游真实模型名:单供应商去 @ 前缀;聚合为剥上下文标记后的裸名
+	members []string // 聚合:按优先级顺序的成员
+}
+
+// resolveDirectTarget 判定请求可否直通:
+//   - 聚合:所有成员都支持客户端格式才整体直通(裸名路由主体不变);
+//   - 单供应商:显式 @ 路由且模型支持客户端格式。
+// 否则返回 false,交由转换路径处理(转换路径自会 404/正常转换)。
+func (s *Server) resolveDirectTarget(fullModel, clientFormat string) (*directTarget, bool) {
+	// native alias 把裸原生 slug 映射到绑定路由模型;fullModel 仅用于响应回填。
+	routed := s.resolveAliasedModel(fullModel)
+	base := provider.StripContextMarker(routed)
+	if s.aggregates != nil {
+		if members, ok := s.aggregates.Members(base); ok {
+			allSupport := true
+			for _, member := range members {
+				p, _, err := s.mgr.Resolve(member + "@" + base)
+				if err != nil || !p.Supports(base, provider.Kind(clientFormat)) {
+					allSupport = false
+					break
+				}
+			}
+			if allSupport {
+				return &directTarget{model: base, members: members}, true
+			}
+		}
+	}
+	p, model, err := s.resolveModel(routed)
+	if err != nil {
+		return nil, false
+	}
+	if !p.Supports(model, provider.Kind(clientFormat)) {
+		return nil, false
+	}
+	return &directTarget{single: true, p: p, model: model}, true
+}
+
+// directCapture 注入转发详情收集器(抹除该供应商 api_key)并设置日志供应商前缀。
+func (s *Server) directCapture(ctx context.Context, p provider.Provider, label string) context.Context {
+	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
+		rec.provider = label
+		rec.error = "" // 故障转移:清空上一成员遗留的错误
+		key := p.Config().APIKey
+		ctx = gateway.WithCapture(ctx, func(url string, reqBody, respBody []byte, status int) {
+			rec.forwardURL = captureBody(url, key)
+			rec.forwardRequest = captureBody(string(reqBody), key)
+			rec.forwardResponse = captureBody(string(respBody), key)
+			rec.upstreamStatus = status
+		})
+	}
+	return ctx
+}
+
+// directComplete 执行一次非流式直通转发:命中返回 true(响应已写出)。
+// labelPrefix 用于分组(组名+"→"),统一 API 为空串;最终 provider 日志为 labelPrefix+供应商名。
+func (s *Server) directComplete(w http.ResponseWriter, r *http.Request, fullModel string, raw []byte, clientFormat, labelPrefix string) bool {
+	target, ok := s.resolveDirectTarget(fullModel, clientFormat)
+	if !ok {
+		return false
+	}
+	reqRaw := rewriteModel(raw, target.model) // 改请求 model 为上游真实模型名(去 @ 前缀/上下文标记)
+	if reqRaw == nil {
+		reqRaw = raw
+	}
+	if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		rec.model = fullModel
+		rec.kind = clientFormat
+		// 直通无格式转换:不记录客户端原始请求体(request_body),只记 forward_*(发给上游的)。
+		rec.requestBody = ""
+		rec.convertedResponseBody = ""
+	}
+	var status int
+	var body []byte
+	var err error
+	if target.single {
+		ctx := s.directCapture(r.Context(), target.p, labelPrefix+target.p.Name())
+		status, body, err = target.p.CompleteRaw(ctx, provider.Kind(clientFormat), reqRaw)
+		if err != nil {
+			err = redactKey(err, target.p.Config().APIKey)
+		} else if status < 200 || status >= 300 {
+			err = redactKey(fmt.Errorf("upstream returned %d: %s", status, truncateBody(body)), target.p.Config().APIKey)
+		}
+	} else {
+		// 转发顺序用 TryOrder(跳过冷却中成员,负载均衡关闭时固定优先级序)。
+		order, _ := s.aggregates.TryOrder(target.model)
+		status, body, err = s.failoverRaw(target.model, order, func(member string) (int, []byte, error) {
+			p, _, rerr := s.mgr.Resolve(member + "@" + target.model)
+			if rerr != nil {
+				return 0, nil, rerr
+			}
+			ctx := s.directCapture(r.Context(), p, labelPrefix+p.Name())
+			st, bd, cerr := p.CompleteRaw(ctx, provider.Kind(clientFormat), reqRaw)
+			if cerr != nil {
+				return 0, nil, redactKey(cerr, p.Config().APIKey)
+			}
+			if st < 200 || st >= 300 {
+				return st, bd, redactKey(fmt.Errorf("upstream returned %d: %s", st, truncateBody(bd)), p.Config().APIKey)
+			}
+			return st, bd, nil
+		})
+	}
+	if err != nil {
+		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+			rec.error = captureBody(err.Error(), "")
+		}
+		writeRouteError(w, err)
+		return true
+	}
+	// 2xx:回填响应 model 为客户端请求的完整模型名,状态码原样透传。
+	out := rewriteModel(body, fullModel)
+	if out == nil {
+		out = body
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(out)
+	return true
+}
+
+// directStream 执行一次流式直通转发:命中返回 true(响应已开始写出)。
+// 故障转移在流开始前完成(非 2xx/传输失败切换成员);拿到 2xx 上游 SSE 体后
+// 逐事件透传并仅改写各格式事件中的 model 字段。
+func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel string, raw []byte, clientFormat, labelPrefix string) bool {
+	target, ok := s.resolveDirectTarget(fullModel, clientFormat)
+	if !ok {
+		return false
+	}
+	reqRaw := rewriteModel(raw, target.model)
+	if reqRaw == nil {
+		reqRaw = raw
+	}
+	if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		rec.model = fullModel
+		rec.kind = clientFormat
+		// 直通无格式转换:不记录客户端原始请求体(request_body),只记 forward_*。
+		rec.requestBody = ""
+		rec.convertedResponseBody = ""
+	}
+	routeError := func(err error) {
+		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+			rec.error = captureBody(err.Error(), "")
+		}
+		writeRouteError(w, err)
+	}
+	var body io.ReadCloser
+	if target.single {
+		ctx := s.directCapture(r.Context(), target.p, labelPrefix+target.p.Name())
+		resp, err := target.p.StreamRaw(ctx, provider.Kind(clientFormat), reqRaw)
+		if err != nil {
+			routeError(redactKey(err, target.p.Config().APIKey))
+			return true
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
+			resp.Body.Close()
+			routeError(redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), target.p.Config().APIKey))
+			return true
+		}
+		body = resp.Body
+	} else {
+		// 聚合:转发顺序用 TryOrder(跳过冷却中成员);闭包内把非 2xx 转为 error 以便切换成员。
+		order, _ := s.aggregates.TryOrder(target.model)
+		err := s.failoverForward(target.model, order, func(member string) error {
+			p, _, rerr := s.mgr.Resolve(member + "@" + target.model)
+			if rerr != nil {
+				return rerr
+			}
+			ctx := s.directCapture(r.Context(), p, labelPrefix+p.Name())
+			resp, serr := p.StreamRaw(ctx, provider.Kind(clientFormat), reqRaw)
+			if serr != nil {
+				return redactKey(serr, p.Config().APIKey)
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				defer resp.Body.Close()
+				data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
+				return redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), p.Config().APIKey)
+			}
+			body = resp.Body
+			return nil
+		})
+		if err != nil {
+			routeError(err)
+			return true
+		}
+	}
+	defer body.Close()
+	flusher, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if err := gateway.RewriteSSEModel(w, body, clientFormat, fullModel); err != nil {
+		// 客户端断开或上游流中断:响应已发出,无法改写状态码。
+		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+			if r.Context().Err() == nil {
+				rec.error = captureBody(err.Error(), "")
+			}
+		}
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return true
+}
+
+// failoverRaw 对聚合成员做原始转发故障转移:依序调用 send(member),闭包负责把非 2xx
+// 转为 error(带抹除密钥),任何 error 均视为成员失败(切换到下一成员);首个成功
+// (err==nil)返回并冷却失败成员;全败返回最后一次错误。
+func (s *Server) failoverRaw(base string, members []string, send func(member string) (int, []byte, error)) (int, []byte, error) {
+	var lastErr error
+	var lastStatus int
+	var lastBody []byte
+	failed := make([]string, 0, len(members))
+	for _, member := range members {
+		status, body, err := send(member)
+		if err != nil {
+			lastErr = err
+			lastStatus, lastBody = status, body
+			failed = append(failed, member)
+			continue
+		}
+		if len(failed) > 0 {
+			s.aggregates.Ban(base, failed...)
+		}
+		return status, body, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all members failed")
+	}
+	return lastStatus, lastBody, lastErr
+}
+
+// rewriteModel 改写 JSON 的顶层 model 字段。返回改写后的 JSON;无需改写
+// (非 JSON / 无 model 键 / 值未变化)时返回 nil。用 UseNumber 防大整数精度丢失。
+func rewriteModel(data []byte, model string) []byte {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil
+	}
+	cur, ok := obj["model"].(string)
+	if !ok || cur == model {
+		return nil
+	}
+	obj["model"] = model
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// truncateBody 截断上游响应体,用于错误信息。
+func truncateBody(b []byte) string {
+	const max = 500
+	if len(b) > max {
+		return string(b[:max]) + "..."
+	}
+	return string(b)
+}
+
 // ---- 转发端点 ----
 
 // handleAnthropic 接收 Anthropic Messages API 格式的请求。
+// 模型支持该格式时走直通(原样转发,不经中间层转换),否则走现有转换路径。
 func (s *Server) handleAnthropic(w http.ResponseWriter, r *http.Request) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "anthropic request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directStream(w, r, meta.Model, raw, gateway.FormatAnthropic, "") {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.AnthropicRequest
+		if !decodeJSON(w, r, "anthropic request", &req) {
+			return
+		}
+		s.serveStream(w, r, req.ToInternal(), gateway.FormatAnthropic)
+		return
+	}
+	if s.directComplete(w, r, meta.Model, raw, gateway.FormatAnthropic, "") {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.AnthropicRequest
 	if !decodeJSON(w, r, "anthropic request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveStream(w, r, req.ToInternal(), gateway.FormatAnthropic)
-		return
-	}
 	resp, err := s.route(r.Context(), req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToAnthropic())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToAnthropic(), rec)
 }
 
 // handleCompletion 接收 OpenAI chat.completions 格式的请求。
+// 模型支持该格式时走直通(原样转发,不经中间层转换),否则走现有转换路径。
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "completion request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directStream(w, r, meta.Model, raw, gateway.FormatCompletion, "") {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.CompletionRequest
+		if !decodeJSON(w, r, "completion request", &req) {
+			return
+		}
+		s.serveStream(w, r, req.ToInternal(), gateway.FormatCompletion)
+		return
+	}
+	if s.directComplete(w, r, meta.Model, raw, gateway.FormatCompletion, "") {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.CompletionRequest
 	if !decodeJSON(w, r, "completion request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveStream(w, r, req.ToInternal(), gateway.FormatCompletion)
-		return
-	}
 	resp, err := s.route(r.Context(), req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToCompletion())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToCompletion(), rec)
 }
 
 // handleResponses 接收 OpenAI responses 格式的请求。
+// 模型支持该格式时走直通(原样转发,不经中间层转换),否则走现有转换路径。
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "responses request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directStream(w, r, meta.Model, raw, gateway.FormatResponses, "") {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.ResponsesRequest
+		if !decodeJSON(w, r, "responses request", &req) {
+			return
+		}
+		s.serveStream(w, r, req.ToInternal(), gateway.FormatResponses)
+		return
+	}
+	if s.directComplete(w, r, meta.Model, raw, gateway.FormatResponses, "") {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.ResponsesRequest
 	if !decodeJSON(w, r, "responses request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveStream(w, r, req.ToInternal(), gateway.FormatResponses)
-		return
-	}
 	resp, err := s.route(r.Context(), req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToResponses())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToResponses(), rec)
 }
 
 // serveStream 是统一 API 流式转发公共路径:解析供应商、启动上游流、经规范化事件回写 SSE。
@@ -471,13 +1049,20 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, req *gatewa
 		return
 	}
 	defer body.Close()
-	if err := s.writeSSE(w, clientFormat, upFormat, fullModel, body); err != nil {
+	out := w
+	var rec *logRecord
+	if rv, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		rec = rv
+		out = newCaptureWriter(w) // 记录转换后回客户端的 SSE 前段
+	}
+	if err := s.writeSSE(out, clientFormat, upFormat, fullModel, body); err != nil {
 		// 客户端断开或上游流中断:响应已发出,无法改写状态码。
-		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
-			if r.Context().Err() == nil {
-				rec.error = captureBody(err.Error(), "")
-			}
+		if rec != nil && r.Context().Err() == nil {
+			rec.error = captureBody(err.Error(), "")
 		}
+	}
+	if rec != nil {
+		rec.convertedResponseBody = captureBody(string(out.(*captureWriter).buf), "")
 	}
 }
 
@@ -521,7 +1106,9 @@ func (s *Server) streamRoute(ctx context.Context, req *gateway.Request) (io.Read
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.model = fullModel
 	}
-	base := provider.StripContextMarker(fullModel)
+	// native alias 把裸原生 slug 映射到绑定路由模型;fullModel 保持原始值用于响应回填。
+	routed := s.resolveAliasedModel(fullModel)
+	base := provider.StripContextMarker(routed)
 	if members, ok := s.aggregateMembers(base); ok {
 		var body io.ReadCloser
 		var upFormat string
@@ -536,7 +1123,7 @@ func (s *Server) streamRoute(ctx context.Context, req *gateway.Request) (io.Read
 		})
 		return body, upFormat, err
 	}
-	p, model, err := s.resolveModel(fullModel)
+	p, model, err := s.resolveModel(routed)
 	if err != nil {
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")
@@ -582,6 +1169,88 @@ func (s *Server) writeSSE(w http.ResponseWriter, clientFormat, upFormat, fullMod
 // 在调用本函数前先走 aggregateMembers 分支。
 func (s *Server) resolveModel(model string) (provider.Provider, string, error) {
 	return s.mgr.Resolve(provider.StripContextMarker(model))
+}
+
+// splitContextMarker 把模型 id 拆为基础名与上下文标记(如 [1M]);无合法标记时
+// 标记为空。复用 provider.StripContextMarker 的合法标记判定。
+func splitContextMarker(model string) (base, marker string) {
+	base = provider.StripContextMarker(model)
+	if base == model {
+		return model, ""
+	}
+	return base, model[len(base):]
+}
+
+// effectiveModels 返回预设生效的模型列表:显式 Models(≤7)优先;留空回退网关全部
+// 可路由模型(自动分配前 7 个,向后兼容)。
+func (s *Server) effectiveModels(p codex.Config) []string {
+	if len(p.Models) > 0 {
+		return p.Models
+	}
+	return s.allModelIDs()
+}
+
+// nativeAliases 返回生效的 native-alias 绑定(slug → NativeAlias):收集全部 codex
+// 预设的生效模型列表并集,按模型 id 排序,依次占用原生 id 池(每 slug 一模型,
+// 池 7 个用尽即停)。display_name 用模型 id(诚实标签:桌面显示真实模型名;原生
+// slug 只是通过 Desktop allowlist 的"护照",对应关系无关紧要)。
+// codex 预设未启用时为空。
+func (s *Server) nativeAliases() map[string]codex.NativeAlias {
+	if s.codex == nil {
+		return nil
+	}
+	pool := codex.NativeOpenAISlugs()
+	var models []string
+	seen := make(map[string]bool)
+	for _, p := range s.codex.List() {
+		for _, m := range s.effectiveModels(p) {
+			m = strings.TrimSpace(m)
+			if m == "" || seen[m] {
+				continue
+			}
+			seen[m] = true
+			models = append(models, m)
+		}
+	}
+	sort.Strings(models)
+	out := make(map[string]codex.NativeAlias, len(models))
+	for i, m := range models {
+		if i >= len(pool) {
+			break
+		}
+		out[pool[i]] = codex.NativeAlias{Slug: pool[i], Model: m, DisplayName: m}
+	}
+	return out
+}
+
+// defaultCodexBaseURL 返回网关统一 API 入口(预设 base_url 留空时使用):
+// 本地默认 http://127.0.0.1:<监听端口>/api/v1;远程部署时由调用方再按广告地址改写。
+func (s *Server) defaultCodexBaseURL() string {
+	port := "18154"
+	if s.deployment != nil && s.deployment.ListenPort != "" {
+		port = s.deployment.ListenPort
+	}
+	return "http://127.0.0.1:" + port + "/api/v1"
+}
+
+// resolveAliasedModel 若 model(去上下文标记后)是 native-alias slug,返回其绑定的
+// 路由模型(保留原上下文标记;绑定模型自带标记时不叠加);否则原样返回。仅影响路由
+// 目标,请求模型回填仍用调用方传入的原始 fullModel。
+func (s *Server) resolveAliasedModel(model string) string {
+	base, marker := splitContextMarker(model)
+	// 原生 slug 是裸 id(无 @、无 /):合成 id/带前缀 id 不可能是别名,短路避免
+	// 每次请求都重建绑定映射。
+	if strings.ContainsAny(base, "@/") {
+		return model
+	}
+	a, ok := s.nativeAliases()[base]
+	if !ok {
+		return model
+	}
+	if marker != "" {
+		return provider.StripContextMarker(a.Model) + marker
+	}
+	return a.Model
 }
 
 // aggregateMembers 若模型是聚合模型,返回其故障转移尝试顺序(轮询起点、跳过冷却中
@@ -657,7 +1326,9 @@ func (s *Server) route(ctx context.Context, req *gateway.Request) (*gateway.Resp
 		rec.model = req.Model
 	}
 	fullModel := req.Model
-	base := provider.StripContextMarker(fullModel)
+	// native alias 把裸原生 slug 映射到绑定路由模型;fullModel 保持原始值用于响应回填。
+	routed := s.resolveAliasedModel(fullModel)
+	base := provider.StripContextMarker(routed)
 	if members, ok := s.aggregateMembers(base); ok {
 		var resp *gateway.Response
 		err := s.failoverForward(base, members, func(member string) error {
@@ -671,7 +1342,7 @@ func (s *Server) route(ctx context.Context, req *gateway.Request) (*gateway.Resp
 		})
 		return resp, err
 	}
-	p, model, err := s.resolveModel(fullModel)
+	p, model, err := s.resolveModel(routed)
 	if err != nil {
 		return nil, err
 	}
@@ -795,16 +1466,25 @@ func (s *Server) handleSyncModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, errors.New("sync returned no models; refusing to overwrite existing models"))
 		return
 	}
-	// 同步模型:已在列表中的模型保留其模型级接口格式,新增模型使用供应商默认(Kind 留空)。
+	// 同步模型:已在列表中的模型保留其模型级接口格式与上下文窗口,新增模型使用
+	// 供应商默认(Kind 留空、窗口 0 = 200k)。
 	existingKind := make(map[string]provider.Kind)
+	existingWindow := make(map[string]int)
 	for _, m := range p.Models() {
 		if m.Kind != "" {
 			existingKind[m.Name] = m.Kind
 		}
+		if m.ContextWindow != 0 {
+			existingWindow[m.Name] = m.ContextWindow
+		}
 	}
 	modelCfgs := make([]provider.ModelConfig, 0, len(models))
 	for _, id := range models {
-		modelCfgs = append(modelCfgs, provider.ModelConfig{Name: id, Kind: existingKind[id]})
+		modelCfgs = append(modelCfgs, provider.ModelConfig{
+			Name:          id,
+			Kind:          existingKind[id],
+			ContextWindow: existingWindow[id],
+		})
 	}
 	// 只更新模型列表,保留其余字段,避免覆盖并发的配置修改。
 	if err := s.mgr.SetModels(p.Name(), modelCfgs); err != nil {
@@ -816,6 +1496,53 @@ func (s *Server) handleSyncModels(w http.ResponseWriter, r *http.Request) {
 		"models":   models,
 		"count":    len(models),
 	})
+}
+
+// handleUpdateModelContextWindow 更新单个模型的上下文窗口(k,0 = 清空回默认 200k)。
+// body {"context_window":N};N<0 返回 400,供应商/模型不存在返回 404。只改目标模型
+// 的窗口,其余配置不变(供模型管理页行内编辑,无需整份提交供应商配置)。
+func (s *Server) handleUpdateModelContextWindow(w http.ResponseWriter, r *http.Request) {
+	if !requireJSONBody(w, r) {
+		return
+	}
+	var body struct {
+		ContextWindow int `json:"context_window"`
+	}
+	if !decodeJSON(w, r, "model context window", &body) {
+		return
+	}
+	if body.ContextWindow < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("context_window must be >= 0"))
+		return
+	}
+	p, err := s.mgr.Get(r.PathValue("name"))
+	if err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	model := r.PathValue("model")
+	cfg := p.Config()
+	idx := -1
+	for i, m := range cfg.Models {
+		if m.Name == model {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		writeError(w, http.StatusNotFound, errors.New("model not found"))
+		return
+	}
+	// 复制切片再改目标项,避免与管理器内部配置共享底层数组造成别名修改。
+	newModels := make([]provider.ModelConfig, len(cfg.Models))
+	copy(newModels, cfg.Models)
+	newModels[idx].ContextWindow = body.ContextWindow
+	cfg.Models = newModels
+	if err := s.mgr.Update(cfg); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sanitizeConfig(cfg))
 }
 
 // handleUsageProvider 从配置的 UsageURL 查询用量并原样透传上游响应。
@@ -844,6 +1571,8 @@ func (s *Server) handleUsageProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListLogs 返回最近若干条请求日志(最新的在前);limit 默认 100,上限 1000。
+// 默认只返回 /api 转发日志(管理端点的日志不进列表,避免界面被管理操作刷屏);
+// 传 scope=all 可查看全部(含 /manage)。
 func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	if s.log == nil {
 		writeError(w, http.StatusBadRequest, errors.New("request logging is disabled"))
@@ -858,12 +1587,64 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	entries, err := s.log.Recent(limit)
+	var keep func(logger.Entry) bool
+	if r.URL.Query().Get("scope") != "all" {
+		// 仅转发日志:/api 路径(统一 API 与分组虚拟供应商)。
+		keep = func(e logger.Entry) bool { return strings.HasPrefix(e.Path, "/api") }
+	}
+	entries, err := s.log.Recent(limit, keep)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleLogFile 返回当前请求日志文件路径(每次运行默认以启动时间戳命名,
+// 供前端展示用户当前正在查看哪份日志)。
+func (s *Server) handleLogFile(w http.ResponseWriter, r *http.Request) {
+	if s.log == nil {
+		writeError(w, http.StatusBadRequest, errors.New("request logging is disabled"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": s.log.Path()})
+}
+
+// handleGetLogDetail 返回当前日志完整度("default" / "full")。
+func (s *Server) handleGetLogDetail(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"detail": s.logDetailOf()})
+}
+
+// handleSetLogDetail 设置日志完整度(body {detail:"default"|"full"}),运行时生效
+// 并持久化到配置(若配置了持久化路径)。
+func (s *Server) handleSetLogDetail(w http.ResponseWriter, r *http.Request) {
+	if !requireJSONBody(w, r) {
+		return
+	}
+	var req struct {
+		Detail string `json:"detail"`
+	}
+	if !decodeJSON(w, r, "log detail", &req) {
+		return
+	}
+	if req.Detail != LogDetailDefault && req.Detail != LogDetailFull {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("detail must be %q or %q", LogDetailDefault, LogDetailFull))
+		return
+	}
+	s.logDetailMu.Lock()
+	s.logDetail = req.Detail
+	path := s.logDetailPath
+	s.logDetailMu.Unlock()
+	if path != "" {
+		data, err := json.MarshalIndent(map[string]string{"detail": req.Detail}, "", "  ")
+		if err == nil {
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("persist log detail: %w", err))
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"detail": req.Detail})
 }
 
 // handleFetchModels 从未注册供应商的模型列表地址拉取模型列表,供前端表单自动填充。
@@ -955,12 +1736,14 @@ func writeKeyError(w http.ResponseWriter, err error) {
 	}
 }
 
-// modelEntry 是模型列表中的一项,id 为 "{供应商名}-{模型名}"。
-// 遵循 OpenAI 兼容 /models 规范,元素仅含 id/object/owned_by。
+// modelEntry 是模型列表中的一项,id 为 "{供应商名}@{模型名}" 或聚合裸名。
+// 遵循 OpenAI 兼容 /models 规范,元素仅含 id/object/owned_by;
+// context_window 为供应商模型配置的上下文窗口(k 为单位,聚合模型/未配置时省略)。
 type modelEntry struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	OwnedBy string `json:"owned_by"`
+	ID            string `json:"id"`
+	Object        string `json:"object"`
+	OwnedBy       string `json:"owned_by"`
+	ContextWindow int    `json:"context_window,omitempty"`
 }
 
 type modelList struct {
@@ -968,9 +1751,10 @@ type modelList struct {
 	Data   []modelEntry `json:"data"`
 }
 
-// handleListModels 聚合所有供应商的模型与聚合模型,按 id 排序。
-// 合成 id 为 "{供应商}@{模型}";聚合模型为不含 @ 的裸模型名(owned_by=unified)。
-func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+// allModelEntries 聚合网关全部可路由模型:各供应商模型合成 "{供应商}@{模型}"
+// (经 Resolve 验证真实命中)+ 聚合模型(裸名)。返回按 id 排序的条目列表,
+// 是 /api/v1/models、/manage/v1/models 与 codex 模型目录的共同数据源。
+func (s *Server) allModelEntries() []modelEntry {
 	entries := make([]modelEntry, 0)
 	seen := make(map[string]bool)
 	for _, cfg := range s.mgr.List() {
@@ -985,9 +1769,10 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			}
 			seen[id] = true
 			entries = append(entries, modelEntry{
-				ID:      id,
-				Object:  "model",
-				OwnedBy: cfg.Name,
+				ID:            id,
+				Object:        "model",
+				OwnedBy:       cfg.Name,
+				ContextWindow: m.ContextWindow,
 			})
 		}
 	}
@@ -1002,7 +1787,12 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	writeJSON(w, http.StatusOK, modelList{Object: "list", Data: entries})
+	return entries
+}
+
+// handleListModels 聚合所有供应商的模型与聚合模型,按 id 排序。
+func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, modelList{Object: "list", Data: s.allModelEntries()})
 }
 
 // ---- 响应与错误 ----

@@ -351,6 +351,16 @@ func (d *completionDecoder) finish() error {
 		}
 		d.pending = nil
 	}
+	if d.sentStart && !d.hasDelta {
+		// 上游流被截断:已开始输出却未收到 finish_reason/[DONE](如模型输出被
+		// 截断在工具调用参数中途)。关闭未结束的内容块,再以截断错误收尾——
+		// 不能假装正常结束,否则客户端拿到未闭合的 tool_use 块会把残缺的工具
+		// 调用当成交付成功的正常消息,导致对话静默提前中止。
+		if err := d.closeBlocks(); err != nil {
+			return err
+		}
+		return d.emit(StreamEvent{Type: StreamError, Error: "upstream stream ended unexpectedly (missing finish_reason/[DONE])"})
+	}
 	return d.emit(StreamEvent{Type: StreamMessageStop})
 }
 

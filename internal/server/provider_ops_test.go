@@ -202,7 +202,8 @@ func TestRequestLoggingUnauthorized(t *testing.T) {
 	srv := httptest.NewServer(New(m).WithAPIKey("secret").WithLogger(lg).Handler())
 	defer srv.Close()
 
-	if _, err := http.Get(srv.URL + "/api/v1/models"); err != nil {
+	// 用受保护的转发端点而非公开的 /api/v1/models(模型列表公开,免 key)。
+	if _, err := http.Get(srv.URL + "/api/v1/messages"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -350,7 +351,7 @@ func TestRequestLoggingForwardDetail(t *testing.T) {
 	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: up.URL, APIKey: "sk-test"}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(m).WithLogger(lg).Handler())
+	srv := httptest.NewServer(New(m).WithLogger(lg).WithLogDetail(LogDetailFull).Handler())
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/v1/chat/completions", "application/json",
@@ -403,7 +404,7 @@ func TestRequestLoggingForwardRedactsKey(t *testing.T) {
 	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: up.URL, APIKey: "SUPERSECRET"}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(m).WithLogger(lg).Handler())
+	srv := httptest.NewServer(New(m).WithLogger(lg).WithLogDetail(LogDetailFull).Handler())
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/v1/chat/completions", "application/json",
@@ -513,14 +514,16 @@ func TestListLogsEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lg.Close()
-	// 直接写入两条日志。
+	// 写入日志:两条 /api(转发)+ 一条 /manage(管理操作)。
 	lg.Log(logger.Entry{Timestamp: "2026-01-01T00:00:00Z", Method: "GET", Path: "/api/v1/models", Status: 200})
 	lg.Log(logger.Entry{Timestamp: "2026-01-01T00:00:01Z", Method: "POST", Path: "/api/v1/chat/completions", Status: 502, UpstreamStatus: 429})
+	lg.Log(logger.Entry{Timestamp: "2026-01-01T00:00:02Z", Method: "PUT", Path: "/manage/v1/providers/oa", Status: 200})
 
 	m := newMgr(t)
 	srv := httptest.NewServer(New(m).WithLogger(lg).Handler())
 	defer srv.Close()
 
+	// 默认只返回 /api 转发日志,不含 /manage。
 	resp, body := doJSON(t, srv, http.MethodGet, "/manage/v1/logs?limit=10", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
@@ -530,11 +533,32 @@ func TestListLogsEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
+		t.Fatalf("entries = %d, want 2 (api only)", len(entries))
 	}
-	// 最新的在前。
+	// 最新的在前,且都是 /api 路径。
 	if entries[0].Path != "/api/v1/chat/completions" || entries[0].UpstreamStatus != 429 {
 		t.Errorf("entries = %+v", entries)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Path, "/api") {
+			t.Errorf("entry leaked manage path: %s", e.Path)
+		}
+	}
+
+	// scope=all 返回全部(含 /manage):3 条原始日志 + 上一次 /manage/v1/logs 请求自身的日志。
+	resp, body = doJSON(t, srv, http.MethodGet, "/manage/v1/logs?limit=10&scope=all", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
+	}
+	if err := json.Unmarshal([]byte(body), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("scope=all entries = %d, want 4 (3 written + 1 logs-request itself)", len(entries))
+	}
+	// 最新的一条是上一次 /manage/v1/logs 请求自身的日志(管理端点也会记录)。
+	if entries[0].Path != "/manage/v1/logs" {
+		t.Errorf("scope=all newest = %q, want /manage/v1/logs", entries[0].Path)
 	}
 }
 
@@ -647,4 +671,171 @@ func TestSyncModelsPreservesKind(t *testing.T) {
 			}
 		}
 	}
+}
+
+// 日志完整度分级:default 模式下成功请求只记基础字段(不含 forward_*),
+// 出错请求记录完整转发详情。
+func TestLogDetailDefaultFiltersSuccess(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c1","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer up.Close()
+
+	logPath := filepath.Join(t.TempDir(), "requests.jsonl")
+	lg, err := logger.New(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+
+	m := newMgr(t)
+	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: up.URL, APIKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(m).WithLogger(lg).Handler()) // 默认 default
+	defer srv.Close()
+
+	// 成功请求:只记基础字段,无 forward_*。
+	resp, err := http.Post(srv.URL+"/api/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"oa@gpt-4o","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	entries := readLogEntries(t, logPath)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if entries[0].Status != 200 {
+		t.Errorf("status = %d, want 200", entries[0].Status)
+	}
+	if entries[0].ForwardURL != "" || entries[0].ForwardRequest != "" || entries[0].ForwardResponse != "" {
+		t.Errorf("default success should not record forward detail: %+v", entries[0])
+	}
+	if entries[0].RequestBody != "" || entries[0].ConvertedResponseBody != "" {
+		t.Errorf("default success should not record bodies: %+v", entries[0])
+	}
+
+	// 出错请求:记录完整转发详情。
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"boom"}`)
+	}))
+	defer bad.Close()
+	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "bad", BaseURL: bad.URL, APIKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	// 注意:bad 供应商模型 gpt-4o 支持 completion → 直通;直通清空 request_body,
+	// 只记 forward_*(发给上游/上游返回)。这里验证 default 下出错时直通也记 forward_*。
+	resp2, err := http.Post(srv.URL+"/api/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"bad@gpt-4o","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	entries2 := readLogEntries(t, logPath)
+	if len(entries2) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries2))
+	}
+	e := entries2[1] // readLogEntries 顺序读,最新在末尾
+	if e.Status != 502 || e.Error == "" {
+		t.Errorf("error entry = %+v", e)
+	}
+	if e.ForwardURL == "" || e.ForwardRequest == "" || e.ForwardResponse == "" {
+		t.Errorf("default error should record forward detail: %+v", e)
+	}
+	// 直通不记 request_body(用户确认直通只记 forward_*)。
+	if e.RequestBody != "" {
+		t.Errorf("direct path should NOT record request_body: %+v", e.RequestBody)
+	}
+}
+
+// 完整模式(full):成功请求也记录 request_body / forward_* / converted_response_body。
+// 用跨格式转换路径(anthropic 客户端 → completion 上游)验证 4 个字段都记录。
+func TestLogDetailFullRecordsEverything(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c1","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer up.Close()
+
+	logPath := filepath.Join(t.TempDir(), "requests.jsonl")
+	lg, err := logger.New(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+
+	m := newMgr(t)
+	if err := m.Add(provider.Config{Kind: provider.KindCompletion, Name: "oa", BaseURL: up.URL, APIKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(m).WithLogger(lg).WithLogDetail(LogDetailFull).Handler())
+	defer srv.Close()
+
+	// anthropic 格式 → completion 上游:模型只支持 completion,走转换路径。
+	resp, err := http.Post(srv.URL+"/api/v1/messages", "application/json",
+		strings.NewReader(`{"model":"oa@gpt-4o","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	entries := readLogEntries(t, logPath)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.RequestBody == "" || !strings.Contains(e.RequestBody, `"model":"oa@gpt-4o"`) {
+		t.Errorf("full should record request_body: %q", e.RequestBody)
+	}
+	if e.ForwardURL == "" || e.ForwardRequest == "" || e.ForwardResponse == "" {
+		t.Errorf("full should record forward detail: %+v", e)
+	}
+	// 转换后回客户端的是 anthropic 格式(客户端发 anthropic 请求)。
+	if e.ConvertedResponseBody == "" || !strings.Contains(e.ConvertedResponseBody, `"text":"hi"`) {
+		t.Errorf("full should record converted_response_body: %q", e.ConvertedResponseBody)
+	}
+}
+
+// 日志完整度管理端点:GET 返回当前级别,PUT 设置并持久化,重启后读持久化值。
+func TestLogDetailEndpoint(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "requests.jsonl")
+	lg, err := logger.New(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+	detailFile := filepath.Join(t.TempDir(), "logdetail.json")
+
+	m := newMgr(t)
+	srv := httptest.NewServer(New(m).WithLogger(lg).WithLogDetailPath(detailFile).Handler())
+	defer srv.Close()
+
+	// 默认 default。
+	resp, body := doJSON(t, srv, http.MethodGet, "/manage/v1/logs/detail", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d; body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"detail":"default"`) {
+		t.Errorf("GET detail = %s", body)
+	}
+	// 非法值拒绝。
+	resp, _ = doJSON(t, srv, http.MethodPut, "/manage/v1/logs/detail", `{"detail":"nope"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("PUT invalid status = %d, want 400", resp.StatusCode)
+	}
+	// 设置 full。
+	resp, body = doJSON(t, srv, http.MethodPut, "/manage/v1/logs/detail", `{"detail":"full"}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"detail":"full"`) {
+		t.Fatalf("PUT full = %d; %s", resp.StatusCode, body)
+	}
+	// 持久化文件已写。
+	if data, err := os.ReadFile(detailFile); err != nil || !strings.Contains(string(data), `"full"`) {
+		t.Errorf("persisted file = %q, err=%v", data, err)
+	}
+	// 新 Server 读持久化文件(经 WithLogDetailPath + 重新构造需手动加载——这里验证持久化文件内容即可)。
 }

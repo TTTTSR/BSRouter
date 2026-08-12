@@ -277,8 +277,8 @@ func TestGroupAuthRequired(t *testing.T) {
 	srv := httptest.NewServer(New(newMgr(t)).WithAPIKey("secret").WithGroups(gm).Handler())
 	defer srv.Close()
 
-	// 无 key 访问分组虚拟端点 -> 401。
-	resp, _ := doJSON(t, srv, http.MethodGet, "/api/team-a/v1/models", "")
+	// 无 key 访问分组转发端点(受保护,非公开模型列表)-> 401。
+	resp, _ := doJSON(t, srv, http.MethodPost, "/api/team-a/v1/chat/completions", `{"model":"x"}`)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no-key group status = %d, want 401", resp.StatusCode)
 	}
@@ -308,7 +308,7 @@ func TestGroupLogging(t *testing.T) {
 	if err := gm.Add(group.Config{Name: "team-a", Kind: provider.KindCompletion, Models: []string{"openai@gpt-4o"}}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(m).WithGroups(gm).WithLogger(lg).Handler())
+	srv := httptest.NewServer(New(m).WithGroups(gm).WithLogger(lg).WithLogDetail(LogDetailFull).Handler())
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/team-a/v1/chat/completions", "application/json",

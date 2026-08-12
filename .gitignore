@@ -29,6 +29,8 @@ webui/BSRouterWebUI/.vite/
 .claude/
 CLAUDE.md
 CLAUDE.local.md
+.codex/
+ccswitch/
 
 # ---- 网关运行产物:配置与日志(含明文密钥,绝不入库) ----
 # 运行目录
@@ -40,6 +42,8 @@ keys.json
 claude.json
 aggregates.json
 network.json
+AGENTS.md
+bsrtest-results.json
 
 # 默认配置目录(Windows %APPDATA%\BSRouter / macOS / Linux XDG)
 config.json

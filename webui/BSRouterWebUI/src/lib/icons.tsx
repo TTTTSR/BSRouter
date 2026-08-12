@@ -121,6 +121,38 @@ export function IconChevron({ size }: IconBase) {
   )
 }
 
+// 拖拽手柄(六点),用于渠道优先级排序。
+export function IconGrip({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <circle cx="9" cy="6" r="1.2" />
+      <circle cx="15" cy="6" r="1.2" />
+      <circle cx="9" cy="12" r="1.2" />
+      <circle cx="15" cy="12" r="1.2" />
+      <circle cx="9" cy="18" r="1.2" />
+      <circle cx="15" cy="18" r="1.2" />
+    </S>
+  )
+}
+
+export function IconArrowUp({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <line x1="12" y1="19" x2="12" y2="5" />
+      <polyline points="5 12 12 5 19 12" />
+    </S>
+  )
+}
+
+export function IconArrowDown({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <polyline points="19 12 12 19 5 12" />
+    </S>
+  )
+}
+
 export function IconKey({ size }: IconBase) {
   return (
     <S size={size}>
@@ -143,6 +175,16 @@ export function IconTerminal({ size }: IconBase) {
     <S size={size}>
       <polyline points="4 17 10 11 4 5" />
       <line x1="12" y1="19" x2="20" y2="19" />
+    </S>
+  )
+}
+
+// Codex 预设(代码括号)
+export function IconCodex({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
     </S>
   )
 }

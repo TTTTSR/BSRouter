@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -151,54 +152,135 @@ func (s *Server) handleGroupModels(w http.ResponseWriter, g group.Config) {
 }
 
 func (s *Server) handleGroupCompletion(w http.ResponseWriter, r *http.Request, g group.Config) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "group completion request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directGroupStream(w, r, g, meta.Model, raw, gateway.FormatCompletion) {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.CompletionRequest
+		if !decodeJSON(w, r, "group completion request", &req) {
+			return
+		}
+		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatCompletion)
+		return
+	}
+	if s.directGroupComplete(w, r, g, meta.Model, raw, gateway.FormatCompletion) {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.CompletionRequest
 	if !decodeJSON(w, r, "group completion request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatCompletion)
-		return
-	}
 	resp, err := s.routeGroup(r.Context(), g, req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToCompletion())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToCompletion(), rec)
 }
 
 func (s *Server) handleGroupAnthropic(w http.ResponseWriter, r *http.Request, g group.Config) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "group anthropic request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directGroupStream(w, r, g, meta.Model, raw, gateway.FormatAnthropic) {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.AnthropicRequest
+		if !decodeJSON(w, r, "group anthropic request", &req) {
+			return
+		}
+		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatAnthropic)
+		return
+	}
+	if s.directGroupComplete(w, r, g, meta.Model, raw, gateway.FormatAnthropic) {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.AnthropicRequest
 	if !decodeJSON(w, r, "group anthropic request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatAnthropic)
-		return
-	}
 	resp, err := s.routeGroup(r.Context(), g, req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToAnthropic())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToAnthropic(), rec)
 }
 
 func (s *Server) handleGroupResponses(w http.ResponseWriter, r *http.Request, g group.Config) {
+	raw, ok := s.readRawBody(w, r)
+	if !ok {
+		return
+	}
+	meta := s.metaModelStream(w, raw, "group responses request")
+	if meta == nil {
+		return
+	}
+	if meta.Stream {
+		if s.directGroupStream(w, r, g, meta.Model, raw, gateway.FormatResponses) {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req gateway.ResponsesRequest
+		if !decodeJSON(w, r, "group responses request", &req) {
+			return
+		}
+		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatResponses)
+		return
+	}
+	if s.directGroupComplete(w, r, g, meta.Model, raw, gateway.FormatResponses) {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req gateway.ResponsesRequest
 	if !decodeJSON(w, r, "group responses request", &req) {
 		return
 	}
-	if req.Stream {
-		s.serveGroupStream(w, r, g, req.ToInternal(), gateway.FormatResponses)
-		return
-	}
 	resp, err := s.routeGroup(r.Context(), g, req.ToInternal())
 	if err != nil {
 		writeRouteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.ToResponses())
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	writeConvertedJSON(w, http.StatusOK, resp.ToResponses(), rec)
+}
+
+// directGroupComplete 分组直通(非流式):模型属于分组且支持组格式时转发,否则 false
+// 交由 routeGroup 处理(组外模型由 routeGroup 走 404)。label 用组名+"→"前缀。
+func (s *Server) directGroupComplete(w http.ResponseWriter, r *http.Request, g group.Config, fullModel string, raw []byte, clientFormat string) bool {
+	if !contains(g.Models, fullModel) {
+		return false
+	}
+	return s.directComplete(w, r, fullModel, raw, clientFormat, g.Name+"→")
+}
+
+// directGroupStream 分组直通(流式):模型属于分组且支持组格式时转发,否则 false
+// 交由 serveGroupStream 处理。
+func (s *Server) directGroupStream(w http.ResponseWriter, r *http.Request, g group.Config, fullModel string, raw []byte, clientFormat string) bool {
+	if !contains(g.Models, fullModel) {
+		return false
+	}
+	return s.directStream(w, r, fullModel, raw, clientFormat, g.Name+"→")
 }
 
 // serveGroupStream 是分组流式转发公共路径:校验模型属于分组、启动上游流、经规范化事件回写 SSE。
@@ -210,12 +292,19 @@ func (s *Server) serveGroupStream(w http.ResponseWriter, r *http.Request, g grou
 		return
 	}
 	defer body.Close()
-	if err := s.writeSSE(w, clientFormat, upFormat, fullModel, body); err != nil {
-		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
-			if r.Context().Err() == nil {
-				rec.error = captureBody(err.Error(), "")
-			}
+	out := w
+	var rec *logRecord
+	if rv, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		rec = rv
+		out = newCaptureWriter(w) // 记录转换后回客户端的 SSE 前段
+	}
+	if err := s.writeSSE(out, clientFormat, upFormat, fullModel, body); err != nil {
+		if rec != nil && r.Context().Err() == nil {
+			rec.error = captureBody(err.Error(), "")
 		}
+	}
+	if rec != nil {
+		rec.convertedResponseBody = captureBody(string(out.(*captureWriter).buf), "")
 	}
 }
 
@@ -234,7 +323,9 @@ func (s *Server) streamGroupRoute(ctx context.Context, g group.Config, req *gate
 		}
 		return nil, "", err
 	}
-	base := provider.StripContextMarker(fullModel)
+	// native alias 把裸原生 slug 映射到绑定路由模型;组成员校验用原始请求模型。
+	routed := s.resolveAliasedModel(fullModel)
+	base := provider.StripContextMarker(routed)
 	label, kind := g.Name+"→", string(g.Kind)
 	if members, ok := s.aggregateMembers(base); ok {
 		var body io.ReadCloser
@@ -250,7 +341,7 @@ func (s *Server) streamGroupRoute(ctx context.Context, g group.Config, req *gate
 		})
 		return body, upFormat, err
 	}
-	p, model, err := s.resolveModel(fullModel)
+	p, model, err := s.resolveModel(routed)
 	if err != nil {
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")
@@ -275,7 +366,9 @@ func (s *Server) routeGroup(ctx context.Context, g group.Config, req *gateway.Re
 		}
 		return nil, fmt.Errorf("%w: model %q is not assigned to group %q", provider.ErrNotFound, fullModel, g.Name)
 	}
-	base := provider.StripContextMarker(fullModel)
+	// native alias 把裸原生 slug 映射到绑定路由模型;组成员校验用原始请求模型。
+	routed := s.resolveAliasedModel(fullModel)
+	base := provider.StripContextMarker(routed)
 	label, kind := g.Name+"→", string(g.Kind)
 	if members, ok := s.aggregateMembers(base); ok {
 		var resp *gateway.Response
@@ -290,7 +383,7 @@ func (s *Server) routeGroup(ctx context.Context, g group.Config, req *gateway.Re
 		})
 		return resp, err
 	}
-	p, model, err := s.resolveModel(fullModel)
+	p, model, err := s.resolveModel(routed)
 	if err != nil {
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")

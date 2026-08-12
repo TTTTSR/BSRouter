@@ -179,6 +179,8 @@ code, pre { font-family: var(--mono); }
 .table tbody tr:hover { background: var(--surface); }
 .table tr:last-child td { border-bottom: none; }
 .table .mono { font-family: var(--mono); font-size: 12px; }
+/* 模型管理页行内编辑的上下文窗口输入 */
+.table .table-window { width: 72px; padding: 4px 6px; font-size: 12px; }
 .table .actions { white-space: nowrap; }
 
 /* ---- 徽标 ---- */
@@ -225,12 +227,89 @@ code, pre { font-family: var(--mono); }
 }
 .tag-x:hover { background: var(--fg); color: var(--invert-fg); }
 
+/* 聚合成员 tag 的拖拽排序手柄与移动按钮 */
+.tag-draggable { cursor: grab; }
+.tag-draggable:active { cursor: grabbing; }
+.tag-dragging { opacity: 0.45; }
+.drag-over { border-color: var(--fg); }
+.tag-grip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--faint);
+  padding: 0 2px;
+}
+.tag-move {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tag-move:hover:not(:disabled) { background: var(--surface-hover); }
+.tag-move:disabled { opacity: 0.35; cursor: default; }
+
+/* 模型支持的接口格式多选(checkbox 组) */
+.kind-checkboxes { display: inline-flex; gap: 10px; align-items: center; flex: none; }
+.kind-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kind-check input { margin: 0; accent-color: #111111; cursor: pointer; }
+.kind-check.on { color: var(--fg); font-weight: 600; }
+.kind-inherit {
+  font-size: 12px;
+  color: var(--faint);
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+  white-space: nowrap;
+}
+.kind-inherit.on { color: var(--muted); }
+
+/* 负载均衡开关(扁平切换) */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.toggle.on { background: var(--fg); border-color: var(--fg); }
+.toggle-knob {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--invert-fg);
+  border: 1px solid var(--line-strong);
+  transition: transform 0.15s ease;
+}
+.toggle.on .toggle-knob { transform: translateX(16px); border-color: var(--fg); }
+.toggle:disabled { opacity: 0.5; cursor: default; }
+
 /* ---- 模型按行编辑 ---- */
 .model-rows { display: flex; flex-direction: column; gap: 8px; }
 .model-row { display: flex; gap: 8px; align-items: center; }
-.model-row .input { flex: 1; }
-.model-row .select { width: 150px; flex: none; }
+.model-row .input { flex: 1; min-width: 140px; }
 .model-row .btn { flex: none; }
+/* 上下文窗口(k)输入:固定窄宽,不挤占模型名 */
+.model-row .model-window { flex: none; width: 76px; min-width: 76px; }
 
 /* ---- 弹窗(扁平) ---- */
 .modal-overlay {

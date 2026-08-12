@@ -20,15 +20,60 @@ type ResponsesContent struct {
 }
 
 // ResponsesItem 是 responses 的 input/output 条目,类型由 Type 区分:
-// message / function_call / function_call_output。
+// message / function_call / function_call_output / reasoning。
+// reasoning 是 assistant 的思考内容(deepseek thinking 经 responses 的形态):
+// input 回传 / output 生成均以 summary[].text 承载思考文本。
+// Content 兼容字符串与内容块数组两种形态(Responses API 规范允许消息 content 为
+// 字符串或数组;OpenAI SDK 等客户端对 system/user 消息常发简写形式 {role, content}
+// 且省略 type),解码时经 UnmarshalJSON 归一化为内容块数组并补全 type。
 type ResponsesItem struct {
 	Type      string             `json:"type"`
 	Role      string             `json:"role,omitempty"`
 	Content   []ResponsesContent `json:"content,omitempty"`
+	Summary   []ResponsesContent `json:"summary,omitempty"`
 	CallID    string             `json:"call_id,omitempty"`
 	Name      string             `json:"name,omitempty"`
 	Arguments string             `json:"arguments,omitempty"` // JSON 字符串
 	Output    string             `json:"output,omitempty"`
+}
+
+// UnmarshalJSON 兼容 content 为字符串或内容块数组两种形态,并给简写消息
+// ({role, content} 且省略 type)补全 type="message",避免消息被静默丢弃。
+func (it *ResponsesItem) UnmarshalJSON(data []byte) error {
+	type raw ResponsesItem // 别名避免递归调用本方法
+	var p struct {
+		raw
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*it = ResponsesItem(p.raw)
+	it.Content = responsesContentToBlocks(p.Content)
+	if it.Type == "" && it.Role != "" {
+		it.Type = "message"
+	}
+	return nil
+}
+
+// responsesContentToBlocks 把 responses content 字段(string、null 或内容块数组)
+// 归一化为内容块数组:字符串转单块,数组原样;无法识别时为空。
+func responsesContentToBlocks(data json.RawMessage) []ResponsesContent {
+	if len(data) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		if s == "" {
+			return nil
+		}
+		return []ResponsesContent{{Type: "text", Text: s}}
+	}
+	var blocks []ResponsesContent
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return nil // 非法形态按空处理,不阻断转发
+	}
+	return blocks
 }
 
 // ResponsesTool 是 responses 的工具定义(扁平结构)。
@@ -37,6 +82,12 @@ type ResponsesTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ResponsesReasoning 是 responses 请求的思考启用配置(reasoning 字段)。
+type ResponsesReasoning struct {
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // ResponsesRequest 是 responses 请求体。
@@ -50,6 +101,8 @@ type ResponsesRequest struct {
 	TopP            *float64        `json:"top_p,omitempty"`
 	Stop            []string        `json:"stop,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
+	// Reasoning 是思考启用参数(pi 等客户端发 reasoning:{effort})。
+	Reasoning *ResponsesReasoning `json:"reasoning,omitempty"`
 }
 
 // ToInternal 将 responses 请求体转换为规范化请求。
@@ -63,6 +116,9 @@ func (r *ResponsesRequest) ToInternal() *Request {
 		Stop:        r.Stop,
 		Stream:      r.Stream,
 	}
+	if r.Reasoning != nil {
+		out.ReasoningEffort = r.Reasoning.Effort
+	}
 	for _, it := range r.Input {
 		switch it.Type {
 		case "message":
@@ -70,23 +126,70 @@ func (r *ResponsesRequest) ToInternal() *Request {
 			for _, c := range it.Content {
 				text += c.Text
 			}
-			if it.Role == "system" {
+			if it.Role == "system" || it.Role == "developer" {
+				// developer 与 system 同为指令角色(Responses API 标准):并入顶层 System,
+				// 避免 developer 作为消息角色原样透传给不认该角色的上游
+				// (如 chat.completions 严格校验的 opencode.ai,会以 400 拒绝)。
 				if out.System != "" {
 					out.System += "\n\n"
 				}
 				out.System += text
 				continue
 			}
-			out.Messages = append(out.Messages, Message{Role: Role(it.Role), Content: text})
+			msg := Message{Role: Role(it.Role), Content: text}
+			// 若上一条是"由 reasoning item 开启"的 assistant(带思考内容),把消息文本并入
+			// 同一条 assistant(思考 + 文本配对),避免拆成两条 assistant 导致 thinking 上游
+			// (如 opencode.ai)要求 reasoning_content 与其所属内容在同一消息内而拒绝。
+			if n := len(out.Messages); n > 0 && msg.Role == RoleAssistant {
+				last := &out.Messages[n-1]
+				if last.Role == RoleAssistant && last.Reasoning != "" {
+					last.Content = text
+					continue
+				}
+			}
+			out.Messages = append(out.Messages, msg)
 		case "function_call":
-			out.Messages = append(out.Messages, Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+			msg := Message{Role: RoleAssistant, ToolCalls: []ToolCall{
 				{ID: it.CallID, Name: it.Name, Arguments: json.RawMessage(it.Arguments)},
-			}})
+			}}
+			// 若上一条是"由 reasoning item 开启"的 assistant(带思考内容,可能已并入文本),
+			// 把工具调用并入同一条(思考 + 内容 + tool_calls 全部配对)——deepseek thinking
+			// 上游要求 reasoning_content 与所属内容/工具调用在同一 assistant 消息内,否则 400。
+			// 连续多个 function_call 全部并入(保持 reasoning 与整组工具调用配对)。
+			if n := len(out.Messages); n > 0 {
+				last := &out.Messages[n-1]
+				if last.Role == RoleAssistant && last.Reasoning != "" {
+					last.ToolCalls = append(last.ToolCalls, msg.ToolCalls...)
+					continue
+				}
+			}
+			out.Messages = append(out.Messages, msg)
 		case "function_call_output":
 			out.Messages = append(out.Messages, Message{Role: RoleTool, ToolCallID: it.CallID, Content: it.Output})
+		case "reasoning":
+			// codex 等 responses 客户端会回传历史 reasoning item(deepseek thinking 要求
+			// 原样回传);提取 summary/content 文本作为 assistant 思考内容,转 completion
+			// 时输出为 reasoning_content,否则上游以 400 拒绝。
+			var text string
+			for _, s := range it.Summary {
+				text += s.Text
+			}
+			for _, c := range it.Content {
+				text += c.Text
+			}
+			if text == "" {
+				continue
+			}
+			out.Messages = append(out.Messages, Message{Role: RoleAssistant, Reasoning: text})
 		}
 	}
 	for _, t := range r.Tools {
+		// 仅转换 function 类型工具:responses API 的内置工具(如 web_search_preview)
+		// 没有 name,无法映射为其它格式的 function 工具,硬转会产出空名 function
+		// 被严格上游(如 opencode.ai)以 400 拒绝。非 function 类型直接跳过。
+		if t.Type != "" && t.Type != "function" {
+			continue
+		}
 		out.Tools = append(out.Tools, Tool{Function: &FunctionTool{
 			Name: t.Name, Description: t.Description, Parameters: t.Parameters,
 		}})
@@ -105,11 +208,22 @@ func (r *Request) ToResponses() *ResponsesRequest {
 		Stop:            r.Stop,
 		Stream:          r.Stream,
 	}
+	if r.ReasoningEffort != "" {
+		// 启用思考:转发为 responses 的 reasoning:{effort, summary}。
+		out.Reasoning = &ResponsesReasoning{Effort: r.ReasoningEffort, Summary: "auto"}
+	}
 	for _, m := range r.Messages {
 		switch m.Role {
 		case RoleTool:
 			out.Input = append(out.Input, ResponsesItem{Type: "function_call_output", CallID: m.ToolCallID, Output: m.Content})
 		case RoleAssistant:
+			if m.Reasoning != "" {
+				// assistant 思考内容作为独立 reasoning item(summary 承载)。
+				out.Input = append(out.Input, ResponsesItem{
+					Type:    "reasoning",
+					Summary: []ResponsesContent{{Type: "summary_text", Text: m.Reasoning}},
+				})
+			}
 			if m.Content != "" {
 				out.Input = append(out.Input, ResponsesItem{
 					Type: "message", Role: string(RoleAssistant),
@@ -234,6 +348,12 @@ func (p *ResponsesProvider) Complete(ctx context.Context, req *Request) (*Respon
 	return resp.ToInternal(), nil
 }
 
+// CompleteRaw 发送原始 wire 请求体(直通)并返回原始响应体与上游状态码,不解析。
+func (p *ResponsesProvider) CompleteRaw(ctx context.Context, raw json.RawMessage) (int, []byte, error) {
+	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
+	return doRaw(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, raw)
+}
+
 // Stream 发送流式请求(stream:true)并返回上游 SSE 响应体,调用方负责 Close。
 func (p *ResponsesProvider) Stream(ctx context.Context, req *Request) (io.ReadCloser, error) {
 	if req == nil {
@@ -251,6 +371,13 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *Request) (io.ReadCl
 		return nil, &apiError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	return resp.Body, nil
+}
+
+// StreamRaw 发送原始流式请求体(直通)并返回上游 SSE 响应体,调用方负责 Close。
+// 非 2xx 由调用方检查 resp.StatusCode 并读取/关闭响应体。
+func (p *ResponsesProvider) StreamRaw(ctx context.Context, raw json.RawMessage) (*http.Response, error) {
+	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
+	return doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, json.RawMessage(raw))
 }
 
 // Do 实现 Requester 接口:responses 请求体可直接发起请求。

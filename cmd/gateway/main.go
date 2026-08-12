@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"BSRouter/internal/aggregate"
 	"BSRouter/internal/apikey"
 	"BSRouter/internal/claude"
+	"BSRouter/internal/codex"
 	"BSRouter/internal/group"
 	"BSRouter/internal/logger"
 	"BSRouter/internal/network"
@@ -107,6 +109,40 @@ func configPath(dir, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// defaultLogName 返回默认请求日志文件名:每次运行以启动时间戳命名(独立文件,
+// 天然截断——新文件从空开始,不累积旧运行内容)。显式传 -log 时尊重用户路径。
+func defaultLogName() string {
+	return "gateway-" + time.Now().Format("20060102-150405") + ".log.jsonl"
+}
+
+// resolveLogDetail 解析日志完整度:显式传 -log-detail 用它;否则读持久化文件;
+// 都无则 default。返回 (detail, 是否合法)。
+func resolveLogDetail(explicit bool, flagVal, filePath string) string {
+	if explicit {
+		if flagVal == server.LogDetailFull {
+			return server.LogDetailFull
+		}
+		if flagVal == server.LogDetailDefault {
+			return server.LogDetailDefault
+		}
+		if flagVal != "" {
+			log.Printf("warning: invalid -log-detail %q, using default", flagVal)
+		}
+		return server.LogDetailDefault
+	}
+	if filePath != "" {
+		if data, err := os.ReadFile(filePath); err == nil {
+			var cfg struct {
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(data, &cfg) == nil && (cfg.Detail == server.LogDetailFull || cfg.Detail == server.LogDetailDefault) {
+				return cfg.Detail
+			}
+		}
+	}
+	return server.LogDetailDefault
+}
+
 // migrateFile 把 src 复制到 dst(仅当 dst 不存在时),用于把旧版散落在运行目录的配置
 // 一次性迁移到 OS 用户配置目录。源文件保留不动,由用户决定是否清理;目录不存在则创建。
 func migrateFile(dst, src string) {
@@ -143,14 +179,22 @@ func main() {
 		apiKey = flag.String("api-key", os.Getenv("GATEWAY_API_KEY"), "gateway api key (all endpoints require it)")
 		// 私密模式:自动生成随机 API Key 用于鉴权并打印;不加该参数且未提供 -api-key 时,网关不鉴权。
 		private = flag.Bool("private", false, "generate a random api key for auth and print it; without it (and no -api-key) the gateway runs unauthenticated")
-		// 请求日志文件(JSONL);传空字符串禁用。
-		logPath = flag.String("log", configPath(cfgDir, "gateway.log.jsonl"), "request log file path (JSONL, empty disables)")
+		// 请求日志文件(JSONL);传空字符串禁用。默认以启动时间戳命名每次运行的独立
+		// 文件(gateway-<时间戳>.log.jsonl);显式传路径则按用户原意(追加,不截断)。
+		logPath = flag.String("log", configPath(cfgDir, defaultLogName()), "request log file path (JSONL, empty disables; default: gateway-<timestamp>.log.jsonl in config dir)")
+		// 日志完整度:default 仅出错时记录完整转发详情;full 全部记录。
+		// 显式传该 flag 用其值;否则读持久化文件;都无则 default。
+		logDetail = flag.String("log-detail", "", "log detail level (default|full; default: only errors record full forward detail, full: record all)")
+		// 日志完整度持久化文件(管理界面开关写回,下次启动读取);传空字符串禁用持久化。
+		logDetailFile = flag.String("log-detail-file", configPath(cfgDir, "logdetail.json"), "log detail level persistence file (empty disables)")
 		// 模型分组配置文件;传空字符串禁用分组功能。
 		groupsPath = flag.String("groups", configPath(cfgDir, "groups.json"), "model group config JSON file path (empty disables)")
 		// 受管 API Key 文件(供下游模型请求鉴权);传空字符串禁用。
 		keysPath = flag.String("keys", configPath(cfgDir, "keys.json"), "managed api key config JSON file path (empty disables)")
 		// Claude Code 配置预设文件;传空字符串禁用。
 		claudePath = flag.String("claude", configPath(cfgDir, "claude.json"), "claude code preset config JSON file path (empty disables)")
+		// OpenAI Codex 配置预设文件;传空字符串禁用。
+		codexPath = flag.String("codex", configPath(cfgDir, "codex.json"), "codex preset config JSON file path (empty disables)")
 		// 聚合模型配置(剔除名单)文件;传空字符串禁用。
 		aggregatesPath = flag.String("aggregates", configPath(cfgDir, "aggregates.json"), "aggregate model config JSON file path (empty disables)")
 		// 出口地址配置(NAT 部署下用户填写的出口 IP 与映射端口)文件;传空字符串禁用。
@@ -160,8 +204,24 @@ func main() {
 		publicAddr = flag.String("public-addr", "", "advertised base URL for remote access (e.g. https://gw.example.com or http://1.2.3.4:443); overrides auto-detection")
 		// 覆盖本地 Claude Code 配置的目标 settings.json 路径;留空默认 ~/.claude/settings.json。
 		claudeSettings = flag.String("claude-settings", "", "path to local Claude Code settings.json to override (default ~/.claude/settings.json)")
+		// 覆盖本地 Codex 配置的目标 config.toml 路径;留空默认 ~/.codex/config.toml。
+		codexConfig = flag.String("codex-config", "", "path to local codex config.toml to override (default ~/.codex/config.toml)")
+		// 覆盖本地 Codex 鉴权的目标 auth.json 路径;留空默认 ~/.codex/auth.json。
+		codexAuth = flag.String("codex-auth", "", "path to local codex auth.json to override (default ~/.codex/auth.json)")
+		// 覆盖本地 Codex 模型目录的目标文件路径;留空默认 ~/.codex/bsrouter-models.json。
+		codexModelCatalog = flag.String("codex-model-catalog", "", "path to local codex model catalog json to override (default ~/.codex/bsrouter-models.json)")
+		// 覆盖本地 Codex 模型缓存的目标文件路径;留空默认 ~/.codex/models_cache.json(桌面 app 读)。
+		codexModelsCache = flag.String("codex-models-cache", "", "path to local codex models cache json to override (default ~/.codex/models_cache.json)")
 	)
 	flag.Parse()
+
+	// 日志完整度:显式 -log-detail 优先,否则读持久化文件,都无则 default。
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	logDetailLevel := resolveLogDetail(explicit["log-detail"], *logDetail, *logDetailFile)
+	if logDetailLevel != server.LogDetailDefault {
+		log.Printf("log detail level: %s", logDetailLevel)
+	}
 
 	// 配置目录就绪 + 一次性迁移:首次以默认路径启动时,把运行目录下已有的同名配置
 	// 复制到 OS 用户目录(仅目标不存在时,源文件保留)。显式传路径(便携式/自定义)不迁移。
@@ -169,8 +229,6 @@ func main() {
 		if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 			log.Printf("warning: cannot create config dir %s: %v", cfgDir, err)
 		}
-		explicit := map[string]bool{}
-		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 		if !explicit["config"] {
 			migrateFile(*config, "providers.json")
 		}
@@ -183,12 +241,14 @@ func main() {
 		if !explicit["claude"] {
 			migrateFile(*claudePath, "claude.json")
 		}
+		if !explicit["codex"] {
+			migrateFile(*codexPath, "codex.json")
+		}
 		if !explicit["aggregates"] {
 			migrateFile(*aggregatesPath, "aggregates.json")
 		}
-		if !explicit["log"] {
-			migrateFile(*logPath, "gateway.log.jsonl")
-		}
+		// 请求日志不做运行目录迁移:默认名含启动时间戳(gateway-<时间戳>.log.jsonl),
+		// 每次运行是独立新文件,迁移旧 gateway.log.jsonl 无意义。
 	}
 
 	// 鉴权 key 优先级:-private > -api-key > 无鉴权。
@@ -242,6 +302,15 @@ func main() {
 		log.Printf("loaded %d claude preset(s) from %s", cm.Count(), *claudePath)
 	}
 
+	var xm *codex.Manager
+	if *codexPath != "" {
+		xm, err = codex.NewManager(*codexPath)
+		if err != nil {
+			log.Fatalf("load codex preset config: %v", err)
+		}
+		log.Printf("loaded %d codex preset(s) from %s", xm.Count(), *codexPath)
+	}
+
 	var am *aggregate.Manager
 	if *aggregatesPath != "" {
 		am, err = aggregate.NewManager(*aggregatesPath, mgr)
@@ -273,9 +342,25 @@ func main() {
 		log.Printf("deployment: -public-addr set, advertising base %s", strings.TrimRight(*publicAddr, "/"))
 	}
 
-	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithAggregates(am).WithDeployment(dep).WithNetworkManager(nm)
+	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithCodexPresets(xm).WithAggregates(am).WithDeployment(dep).WithNetworkManager(nm)
+	if *logDetailFile != "" {
+		srv = srv.WithLogDetailPath(*logDetailFile)
+	}
+	srv = srv.WithLogDetail(logDetailLevel)
 	if *claudeSettings != "" {
 		srv = srv.WithClaudeSettingsPath(*claudeSettings)
+	}
+	if *codexConfig != "" {
+		srv = srv.WithCodexConfigPath(*codexConfig)
+	}
+	if *codexAuth != "" {
+		srv = srv.WithCodexAuthPath(*codexAuth)
+	}
+	if *codexModelCatalog != "" {
+		srv = srv.WithCodexModelCatalogPath(*codexModelCatalog)
+	}
+	if *codexModelsCache != "" {
+		srv = srv.WithCodexModelsCachePath(*codexModelsCache)
 	}
 
 	if key == "" {

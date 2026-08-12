@@ -17,14 +17,6 @@ function deriveName(m: string): string {
   return j > 0 ? rest.slice(0, j) : rest
 }
 
-// Claude Code 的 1M/2M 上下文标记([1m]/[2m],大小写不敏感)检查与剥离。
-function has1M(m: string): boolean {
-  return /\[[12]m\]$/i.test(m)
-}
-function strip1M(m: string): string {
-  return m.replace(/\[[12]m\]$/i, '')
-}
-
 // 模型下拉:不设置 + 所选入口包含的模型。若当前值不在选项中则前置显示(编辑旧预设兜底)。
 function ModelSelect({ value, onChange, options }: {
   value: string
@@ -40,25 +32,12 @@ function ModelSelect({ value, onChange, options }: {
   )
 }
 
-// 1M 上下文复选框:勾选后模型名追加 [1M] 声明(Claude Code 识别为 1M 上下文)。
-function OneMCheckbox({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <label className="faint" title="标记为 1M 上下文(命令写入 [1M])"
-      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap', cursor: 'pointer', fontSize: 12 }}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      1M
-    </label>
-  )
-}
-
-// 档位模型行:实际模型下拉 + 1M 复选框 + 显示名输入放在同一行(span2,复用 .model-row 布局)。
-function TierField({ label, hint, model, onModel, oneM, onOneM, name, onName, options }: {
+// 档位模型行:实际模型下拉 + 显示名输入放在同一行(span2,复用 .model-row 布局)。
+function TierField({ label, hint, model, onModel, name, onName, options }: {
   label: string
   hint?: string
   model: string
   onModel: (v: string) => void
-  oneM: boolean
-  onOneM: (v: boolean) => void
   name: string
   onName: (v: string) => void
   options: string[]
@@ -67,7 +46,6 @@ function TierField({ label, hint, model, onModel, oneM, onOneM, name, onName, op
     <Field label={label} hint={hint} className="span2">
       <div className="model-row">
         <ModelSelect value={model} onChange={onModel} options={options} />
-        <OneMCheckbox checked={oneM} onChange={onOneM} />
         <Input value={name} onChange={(e) => onName(e.target.value)} placeholder="显示名(留空自动推导)" />
       </div>
     </Field>
@@ -164,24 +142,17 @@ function ClaudePresetFormModal({
   const [groups, setGroups] = useState<GroupConfig[]>([])
   const [providers, setProviders] = useState<ProviderConfig[]>([])
   const [aggregateModels, setAggregateModels] = useState<AggregateModel[]>([])
-  // 每个模型字段:状态存裸模型名,1M 复选框单独存布尔;编辑时从存储值解析 [1M]。
-  const [model, setModel] = useState(strip1M(initial?.model ?? ''))
-  const [model1M, setModel1M] = useState(has1M(initial?.model ?? ''))
-  const [subagentModel, setSubagentModel] = useState(strip1M(initial?.subagent_model ?? ''))
-  const [subagentModel1M, setSubagentModel1M] = useState(has1M(initial?.subagent_model ?? ''))
-  const [smallFastModel, setSmallFastModel] = useState(strip1M(initial?.small_fast_model ?? ''))
-  const [smallFastModel1M, setSmallFastModel1M] = useState(has1M(initial?.small_fast_model ?? ''))
-  const [fableModel, setFableModel] = useState(strip1M(initial?.fable_model ?? ''))
-  const [fableModel1M, setFableModel1M] = useState(has1M(initial?.fable_model ?? ''))
+  // 每个模型字段:状态存模型名(可含旧预设的 [1M] 显式标记,后端同步时会处理)。
+  const [model, setModel] = useState(initial?.model ?? '')
+  const [subagentModel, setSubagentModel] = useState(initial?.subagent_model ?? '')
+  const [smallFastModel, setSmallFastModel] = useState(initial?.small_fast_model ?? '')
+  const [fableModel, setFableModel] = useState(initial?.fable_model ?? '')
   const [fableModelName, setFableModelName] = useState(initial?.fable_model_name ?? '')
-  const [opusModel, setOpusModel] = useState(strip1M(initial?.opus_model ?? ''))
-  const [opusModel1M, setOpusModel1M] = useState(has1M(initial?.opus_model ?? ''))
+  const [opusModel, setOpusModel] = useState(initial?.opus_model ?? '')
   const [opusModelName, setOpusModelName] = useState(initial?.opus_model_name ?? '')
-  const [sonnetModel, setSonnetModel] = useState(strip1M(initial?.sonnet_model ?? ''))
-  const [sonnetModel1M, setSonnetModel1M] = useState(has1M(initial?.sonnet_model ?? ''))
+  const [sonnetModel, setSonnetModel] = useState(initial?.sonnet_model ?? '')
   const [sonnetModelName, setSonnetModelName] = useState(initial?.sonnet_model_name ?? '')
-  const [haikuModel, setHaikuModel] = useState(strip1M(initial?.haiku_model ?? ''))
-  const [haikuModel1M, setHaikuModel1M] = useState(has1M(initial?.haiku_model ?? ''))
+  const [haikuModel, setHaikuModel] = useState(initial?.haiku_model ?? '')
   const [haikuModelName, setHaikuModelName] = useState(initial?.haiku_model_name ?? '')
   const [disableAutoupdater, setDisableAutoupdater] = useState(initial?.disable_autoupdater ?? false)
   const [extraEnv, setExtraEnv] = useState<EnvRow[]>(() =>
@@ -189,9 +160,8 @@ function ClaudePresetFormModal({
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // 加载网关分组与供应商列表(统一模型的来源)。数据只取 /manage 端点:
-  // 网关仅配置受管 key(无网关 key)时 /manage 开放而 /api 需受管 key,
-  // 若走 /api/v1/models 会 401 触发全局登出,导致登录页反复弹出。
+  // 加载网关分组与供应商列表(统一模型的来源)。分组/供应商列表是 /manage 管理端点;
+  // 模型列表虽已公开,但分组与供应商数据只能从 /manage 取,故统一走 /manage 鉴权。
   // 编辑时按存储的 base_url 反推入口选择(无法匹配时保留原地址兜底)。
   useEffect(() => {
     let cancelled = false
@@ -253,25 +223,22 @@ function ClaudePresetFormModal({
       if (k && r.value !== '') extra[k] = r.value
     }
     // 不携带 api_key/auth_token:新建使用系统默认 key;编辑时后端保留原密钥。
-    // 勾选 1M 的字段在模型名后追加 [1M] 声明。
-    const oneM = (m: string, flag: boolean) => {
-      const t = m.trim()
-      return t === '' ? '' : t + (flag ? '[1M]' : '')
-    }
+    // 模型名的上下文窗口后缀([Nk]/[1m])由后端按供应商模型配置在命令/应用本地时
+    // 自动派生,此处只存裸模型名。
     const cfg: ClaudePresetConfig = {
       name: name.trim(),
       description: description.trim(),
       base_url: baseUrl,
-      model: oneM(model, model1M),
-      subagent_model: oneM(subagentModel, subagentModel1M),
-      small_fast_model: oneM(smallFastModel, smallFastModel1M),
-      fable_model: oneM(fableModel, fableModel1M),
+      model: model.trim(),
+      subagent_model: subagentModel.trim(),
+      small_fast_model: smallFastModel.trim(),
+      fable_model: fableModel.trim(),
       fable_model_name: fableModelName.trim(),
-      opus_model: oneM(opusModel, opusModel1M),
+      opus_model: opusModel.trim(),
       opus_model_name: opusModelName.trim(),
-      sonnet_model: oneM(sonnetModel, sonnetModel1M),
+      sonnet_model: sonnetModel.trim(),
       sonnet_model_name: sonnetModelName.trim(),
-      haiku_model: oneM(haikuModel, haikuModel1M),
+      haiku_model: haikuModel.trim(),
       haiku_model_name: haikuModelName.trim(),
       disable_autoupdater: disableAutoupdater,
       extra_env: Object.keys(extra).length > 0 ? extra : undefined,
@@ -325,36 +292,29 @@ function ClaudePresetFormModal({
         <Field label="主模型" hint="ANTHROPIC_MODEL">
           <div className="model-row">
             <ModelSelect value={model} onChange={setModel} options={providerModels} />
-            <OneMCheckbox checked={model1M} onChange={setModel1M} />
           </div>
         </Field>
         <Field label="子代理模型" hint="CLAUDE_CODE_SUBAGENT_MODEL">
           <div className="model-row">
             <ModelSelect value={subagentModel} onChange={setSubagentModel} options={providerModels} />
-            <OneMCheckbox checked={subagentModel1M} onChange={setSubagentModel1M} />
           </div>
         </Field>
         <Field label="旧版小模型" hint="ANTHROPIC_SMALL_FAST_MODEL" className="span2">
           <div className="model-row">
             <ModelSelect value={smallFastModel} onChange={setSmallFastModel} options={providerModels} />
-            <OneMCheckbox checked={smallFastModel1M} onChange={setSmallFastModel1M} />
           </div>
         </Field>
         <TierField label="Fable 档位" hint="ANTHROPIC_DEFAULT_FABLE_MODEL"
           model={fableModel} onModel={pickWithName(setFableModel, setFableModelName)}
-          oneM={fableModel1M} onOneM={setFableModel1M}
           name={fableModelName} onName={setFableModelName} options={providerModels} />
         <TierField label="Opus 档位" hint="ANTHROPIC_DEFAULT_OPUS_MODEL"
           model={opusModel} onModel={pickWithName(setOpusModel, setOpusModelName)}
-          oneM={opusModel1M} onOneM={setOpusModel1M}
           name={opusModelName} onName={setOpusModelName} options={providerModels} />
         <TierField label="Sonnet 档位" hint="ANTHROPIC_DEFAULT_SONNET_MODEL"
           model={sonnetModel} onModel={pickWithName(setSonnetModel, setSonnetModelName)}
-          oneM={sonnetModel1M} onOneM={setSonnetModel1M}
           name={sonnetModelName} onName={setSonnetModelName} options={providerModels} />
         <TierField label="Haiku 档位" hint="ANTHROPIC_DEFAULT_HAIKU_MODEL"
           model={haikuModel} onModel={pickWithName(setHaikuModel, setHaikuModelName)}
-          oneM={haikuModel1M} onOneM={setHaikuModel1M}
           name={haikuModelName} onName={setHaikuModelName} options={providerModels} />
         <Field label="禁用自动更新" className="span2">
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

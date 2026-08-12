@@ -23,6 +23,7 @@ type AnthropicContentBlock struct {
 	ID        string           `json:"id,omitempty"`
 	Name      string           `json:"name,omitempty"`
 	Input     json.RawMessage  `json:"input,omitempty"`
+	Thinking  string           `json:"thinking,omitempty"`
 	ToolUseID string           `json:"tool_use_id,omitempty"`
 }
 
@@ -94,6 +95,22 @@ func (s AnthropicSystem) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(s))
 }
 
+// AnthropicThinking 是 Anthropic 的思考启用配置(thinking 字段)。
+// type=enabled 启用思考并给出预算;type=disabled 显式关闭。
+type AnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
+}
+
+// thinkingToEffort 把 Anthropic 思考配置归一化为统一档位名(enabled 才启用)。
+func thinkingToEffort(t *AnthropicThinking) string {
+	if t == nil || t.Type != "enabled" {
+		return ""
+	}
+	return budgetToEffort(t.BudgetTokens)
+}
+
 // AnthropicRequest 是 Anthropic Messages API 请求体。
 type AnthropicRequest struct {
 	Model         string             `json:"model"`
@@ -105,18 +122,21 @@ type AnthropicRequest struct {
 	TopP          *float64           `json:"top_p,omitempty"`
 	StopSequences []string           `json:"stop_sequences,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
+	// Thinking 是思考启用参数(pi 等客户端发送 thinking:{type:"enabled", budget_tokens})。
+	Thinking *AnthropicThinking `json:"thinking,omitempty"`
 }
 
 // ToInternal 将 Anthropic 请求体转换为规范化请求。
 func (r *AnthropicRequest) ToInternal() *Request {
 	out := &Request{
-		Model:       r.Model,
-		System:      string(r.System),
-		MaxTokens:   &r.MaxTokens,
-		Temperature: r.Temperature,
-		TopP:        r.TopP,
-		Stop:        r.StopSequences,
-		Stream:      r.Stream,
+		Model:           r.Model,
+		System:          string(r.System),
+		MaxTokens:       &r.MaxTokens,
+		Temperature:     r.Temperature,
+		TopP:            r.TopP,
+		Stop:            r.StopSequences,
+		Stream:          r.Stream,
+		ReasoningEffort: thinkingToEffort(r.Thinking),
 	}
 	for _, m := range r.Messages {
 		msg := Message{Role: Role(m.Role)}
@@ -126,6 +146,10 @@ func (r *AnthropicRequest) ToInternal() *Request {
 			switch blk.Type {
 			case "text":
 				text += blk.Text
+			case "thinking":
+				// 思考块(deepseek thinking 模式的 reasoning_content):保留到 canonical,
+				// 多轮对话回传时原样输出,否则 thinking 上游以 400 拒绝。
+				msg.Reasoning += blk.Thinking
 			case "tool_use":
 				msg.ToolCalls = append(msg.ToolCalls, ToolCall{ID: blk.ID, Name: blk.Name, Arguments: blk.Input})
 			case "tool_result":
@@ -187,7 +211,8 @@ func repairOrphanToolUse(msgs []Message) []Message {
 			}
 			m.ToolCalls = kept
 		}
-		if m.Role == RoleAssistant && len(m.ToolCalls) == 0 && m.Content == "" {
+		// 纯思考(Reasoning)的 assistant 不属于孤儿:thinking 上游要求历史 reasoning 原样回传。
+		if m.Role == RoleAssistant && len(m.ToolCalls) == 0 && m.Content == "" && m.Reasoning == "" {
 			i++
 			for i < len(msgs) && msgs[i].Role == RoleTool {
 				i++
@@ -214,12 +239,21 @@ func (r *Request) ToAnthropic() *AnthropicRequest {
 	if r.MaxTokens != nil {
 		out.MaxTokens = *r.MaxTokens
 	}
+	if r.ReasoningEffort != "" {
+		// 启用思考:转发为 Anthropic 预算式 thinking(display 省略,兼容非 Claude 上游)。
+		out.Thinking = &AnthropicThinking{Type: "enabled", BudgetTokens: effortToBudget(r.ReasoningEffort)}
+	}
 	for _, m := range r.Messages {
 		if m.Role == RoleTool {
 			out.appendToolResult(m)
 			continue
 		}
 		am := AnthropicMessage{Role: string(m.Role)}
+		if m.Role == RoleAssistant && m.Reasoning != "" {
+			// 对称回传思考内容:Anthropic 扩展块 thinking 承载 canonical 的 Reasoning,
+			// 供 deepseek 类兼容上游在 thinking 模式下多轮回传(否则 400)。
+			am.Content = append(am.Content, AnthropicContentBlock{Type: "thinking", Thinking: m.Reasoning})
+		}
 		if m.Content != "" {
 			am.Content = append(am.Content, AnthropicContentBlock{Type: "text", Text: m.Content})
 		}
@@ -229,11 +263,13 @@ func (r *Request) ToAnthropic() *AnthropicRequest {
 		out.Messages = append(out.Messages, am)
 	}
 	for _, t := range r.Tools {
-		if t.Function != nil {
-			out.Tools = append(out.Tools, AnthropicTool{
-				Name: t.Function.Name, Description: t.Function.Description, InputSchema: t.Function.Parameters,
-			})
+		// 兜底:过滤空名工具,防止空 name 被严格上游拒绝。
+		if t.Function == nil || t.Function.Name == "" {
+			continue
 		}
+		out.Tools = append(out.Tools, AnthropicTool{
+			Name: t.Function.Name, Description: t.Function.Description, InputSchema: t.Function.Parameters,
+		})
 	}
 	return out
 }
@@ -360,6 +396,15 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *Request) (*Respon
 	return resp.ToInternal(), nil
 }
 
+// CompleteRaw 发送原始 wire 请求体(直通)并返回原始响应体与上游状态码,不解析。
+func (p *AnthropicProvider) CompleteRaw(ctx context.Context, raw json.RawMessage) (int, []byte, error) {
+	headers := map[string]string{
+		"x-api-key":         p.apiKey,
+		"anthropic-version": "2023-06-01",
+	}
+	return doRaw(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, raw)
+}
+
 // Stream 发送流式请求(stream:true)并返回上游 SSE 响应体,调用方负责 Close。
 func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (io.ReadCloser, error) {
 	if req == nil {
@@ -380,6 +425,16 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (io.ReadCl
 		return nil, &apiError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	return resp.Body, nil
+}
+
+// StreamRaw 发送原始流式请求体(直通)并返回上游 SSE 响应体,调用方负责 Close。
+// 非 2xx 由调用方检查 resp.StatusCode 并读取/关闭响应体。
+func (p *AnthropicProvider) StreamRaw(ctx context.Context, raw json.RawMessage) (*http.Response, error) {
+	headers := map[string]string{
+		"x-api-key":         p.apiKey,
+		"anthropic-version": "2023-06-01",
+	}
+	return doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, json.RawMessage(raw))
 }
 
 // Do 实现 Requester 接口:Anthropic 请求体可直接发起请求。

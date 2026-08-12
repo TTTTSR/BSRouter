@@ -32,15 +32,26 @@ func TestWebUIServedWithoutAuth(t *testing.T) {
 		t.Errorf("SPA = %d %q", resp.StatusCode, string(b))
 	}
 
-	// API 仍需鉴权。
+	// /manage 仍需鉴权。
 	if resp2, _ := http.Get(srv.URL + "/manage/v1/providers"); resp2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("manage without key status = %d, want 401", resp2.StatusCode)
 	} else {
 		resp2.Body.Close()
 	}
-	if resp2, _ := http.Get(srv.URL + "/api/v1/models"); resp2.StatusCode != http.StatusUnauthorized {
-		t.Errorf("api without key status = %d, want 401", resp2.StatusCode)
+	// 模型列表公开,无需鉴权。
+	if resp2, _ := http.Get(srv.URL + "/api/v1/models"); resp2.StatusCode != http.StatusOK {
+		t.Errorf("api models without key status = %d, want 200", resp2.StatusCode)
 	} else {
 		resp2.Body.Close()
+	}
+	// 其余 /api 端点仍需鉴权(鉴权先于请求体解码,body 可为空)。
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/chat/completions", nil)
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("api forward without key status = %d, want 401", resp2.StatusCode)
 	}
 }

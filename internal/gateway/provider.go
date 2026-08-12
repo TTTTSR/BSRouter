@@ -125,3 +125,37 @@ func doJSON(ctx context.Context, httpc *http.Client, method, url string, headers
 	}
 	return nil
 }
+
+// doRaw 发送原始 JSON 请求体(RawMessage 原样输出)并返回原始响应体与上游状态码,不解析。
+// 供直通路径使用:模型支持请求格式时,请求/响应体均不经中间层转换。
+// 错误仅表示传输/读体失败;HTTP 非 2xx 以状态码表达,由调用方(如聚合故障转移)决策。
+// 无论成败都会(若配置了收集器)记录一次转发详情。
+func doRaw(ctx context.Context, httpc *http.Client, method, url string, headers map[string]string, body json.RawMessage) (int, []byte, error) {
+	if len(body) > 0 && !json.Valid(body) {
+		return 0, nil, fmt.Errorf("gateway: invalid raw request body")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := httpc.Do(req)
+	if err != nil {
+		// 传输层失败(连接/DNS/TLS)也记录转发目标,便于排障。
+		capture(ctx, url, body, nil, 0)
+		return 0, nil, fmt.Errorf("request upstream: %w", err)
+	}
+	defer resp.Body.Close()
+	// 跟随重定向后,resp.Request.URL 才是请求真正落到的地址。
+	landed := resp.Request.URL.String()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBody))
+	if err != nil {
+		capture(ctx, landed, body, nil, resp.StatusCode)
+		return 0, nil, fmt.Errorf("read response body: %w", err)
+	}
+	capture(ctx, landed, body, data, resp.StatusCode)
+	return resp.StatusCode, data, nil
+}

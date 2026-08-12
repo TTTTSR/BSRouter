@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestContextSuffix(t *testing.T) {
+	cases := map[int]string{
+		128:   "[128k]",
+		200:   "[200k]",
+		100:   "[100k]",
+		1000:  "[1m]",
+		2000:  "[2m]",
+		4000:  "[4m]",
+		1500:  "[1500k]",
+		0:     "",
+		-5:    "",
+	}
+	for k, want := range cases {
+		if got := ContextSuffix(k); got != want {
+			t.Errorf("ContextSuffix(%d) = %q, want %q", k, got, want)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	if err := (Config{Name: "dev", BaseURL: "http://127.0.0.1:8080/api", Model: "m"}).Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)

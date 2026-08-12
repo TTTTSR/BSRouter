@@ -1,5 +1,5 @@
 import type {
-  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, SyncResult,
+  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, CodexPresetCommand, CodexPresetConfig, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, SyncResult,
 } from './types'
 
 const KEY_STORAGE = 'bsrouter.api_key'
@@ -71,6 +71,11 @@ export const api = {
     request<PingResult>('POST', `/manage/v1/providers/${encodeURIComponent(name)}/ping`),
   syncModels: (name: string) =>
     request<SyncResult>('POST', `/manage/v1/providers/${encodeURIComponent(name)}/sync-models`),
+  // 更新单个模型的上下文窗口(k;0 = 清空回默认 200k)。
+  updateModelContextWindow: (name: string, model: string, contextWindow: number) =>
+    request<ProviderConfig>('PUT',
+      `/manage/v1/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(model)}`,
+      { context_window: contextWindow }),
   providerUsage: (name: string) =>
     request<unknown>(`GET`, `/manage/v1/providers/${encodeURIComponent(name)}/usage`),
 
@@ -83,9 +88,15 @@ export const api = {
 
   listModels: () => request<ModelList>('GET', '/manage/v1/models'),
   listAggregates: () => request<AggregateModel[]>('GET', '/manage/v1/aggregates'),
-  updateAggregate: (name: string, members: string[]) =>
-    request<{ name: string; members: string[] }>('PUT', `/manage/v1/aggregates/${encodeURIComponent(name)}`, { members }),
+  // members 顺序即渠道优先级;loadBalance 可选(undefined 时不改负载均衡开关)。
+  updateAggregate: (name: string, members: string[], loadBalance?: boolean) =>
+    request<{ name: string; members: string[] }>('PUT', `/manage/v1/aggregates/${encodeURIComponent(name)}`,
+      loadBalance === undefined ? { members } : { members, load_balance: loadBalance }),
   listLogs: (limit = 200) => request<LogEntry[]>('GET', `/manage/v1/logs?limit=${limit}`),
+  logFile: () => request<{ path: string }>('GET', '/manage/v1/logs/file'),
+  logDetail: () => request<{ detail: 'default' | 'full' }>('GET', '/manage/v1/logs/detail'),
+  setLogDetail: (detail: 'default' | 'full') =>
+    request<{ detail: 'default' | 'full' }>('PUT', '/manage/v1/logs/detail', { detail }),
   fetchModels: (input: { name?: string; kind: Kind; base_url: string; api_key: string; models_url: string }) =>
     request<{ models: string[]; count: number }>('POST', '/manage/v1/fetch-models', input),
 
@@ -103,6 +114,17 @@ export const api = {
     request<ClaudePresetCommand>('GET', `/manage/v1/claude-presets/${encodeURIComponent(name)}/command`),
   applyClaudePresetLocal: (name: string) =>
     request<{ applied: boolean; path: string }>('POST', `/manage/v1/claude-presets/${encodeURIComponent(name)}/apply-local`),
+
+  listCodexPresets: () => request<CodexPresetConfig[]>('GET', '/manage/v1/codex-presets'),
+  addCodexPreset: (c: CodexPresetConfig) => request<CodexPresetConfig>('POST', '/manage/v1/codex-presets', c),
+  updateCodexPreset: (name: string, c: CodexPresetConfig) =>
+    request<CodexPresetConfig>('PUT', `/manage/v1/codex-presets/${encodeURIComponent(name)}`, c),
+  deleteCodexPreset: (name: string) =>
+    request<void>('DELETE', `/manage/v1/codex-presets/${encodeURIComponent(name)}`),
+  codexPresetCommand: (name: string) =>
+    request<CodexPresetCommand>('GET', `/manage/v1/codex-presets/${encodeURIComponent(name)}/command`),
+  applyCodexPresetLocal: (name: string) =>
+    request<{ applied: boolean; path: string; auth_path?: string; model_catalog?: string }>('POST', `/manage/v1/codex-presets/${encodeURIComponent(name)}/apply-local`),
 
   checkLocal: () => request<{ local: boolean }>('GET', '/manage/v1/local'),
 

@@ -3,8 +3,8 @@ import type { ReactNode } from 'react'
 import { api, KINDS, KINDS_LABEL } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { Badge, Button, Empty, ErrorAlert, Field, Input, Modal, Select } from '../components/ui'
-import { IconChevron, IconEdit, IconPlus, IconTrash, IconX } from '../lib/icons'
-import type { AggregateModel, GroupConfig, Kind } from '../lib/types'
+import { IconArrowDown, IconArrowUp, IconChevron, IconEdit, IconGrip, IconPlus, IconTrash, IconX } from '../lib/icons'
+import type { AggregateModel, GroupConfig, Kind, ModelEntry } from '../lib/types'
 
 // 可折叠栏目:点击标题展开/收起,内容高度平滑过渡。
 function CollapsibleSection({ title, actions, children }: {
@@ -248,10 +248,50 @@ function GroupsSection() {
 function ModelsSection() {
   const { data, error, loading, reload } = useAsync(() => api.listModels())
   const models = data?.data ?? []
+  // 行内编辑中的窗口输入(id → 输入框文本);保存成功后清除,回退到列表值。
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [busyId, setBusyId] = useState('')
+  const [notice, setNotice] = useState('')
+  const [editErr, setEditErr] = useState('')
+
+  function windowValue(m: ModelEntry): string {
+    if (m.id in draft) return draft[m.id]
+    return m.context_window ? String(m.context_window) : ''
+  }
+
+  // 保存某模型的上下文窗口(k;空 = 清空回默认 200k)。
+  async function saveWindow(m: ModelEntry) {
+    if (!(m.id in draft)) return
+    const v = draft[m.id]
+    const k = v === undefined || v.trim() === '' ? 0 : Number(v)
+    if (!Number.isInteger(k) || k < 0) {
+      setEditErr(`无效的上下文窗口: ${v} (k,留空为默认 200k)`)
+      return
+    }
+    const model = m.id.slice(m.id.indexOf('@') + 1)
+    setBusyId(m.id)
+    setEditErr('')
+    try {
+      await api.updateModelContextWindow(m.owned_by, model, k)
+      setNotice(`已保存 ${m.id} 上下文窗口${k > 0 ? ` ${k}k` : '(默认 200k)'}`)
+      setDraft((d) => {
+        const next = { ...d }
+        delete next[m.id]
+        return next
+      })
+      reload()
+    } catch (e) {
+      setEditErr(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusyId('')
+    }
+  }
 
   return (
     <CollapsibleSection title="已接入模型" actions={<Button variant="ghost" onClick={reload}>刷新</Button>}>
       {error ? <ErrorAlert text={error} /> : null}
+      {notice ? <div className="alert">{notice}</div> : null}
+      {editErr ? <div className="error-text">{editErr}</div> : null}
       {loading ? (
         <Empty text="加载中…" />
       ) : models.length === 0 ? (
@@ -263,6 +303,7 @@ function ModelsSection() {
               <tr>
                 <th>模型 ID</th>
                 <th>所属</th>
+                <th>上下文窗口(k)<span className="faint" title="留空表示默认 200k"> ?</span></th>
               </tr>
             </thead>
             <tbody>
@@ -270,6 +311,29 @@ function ModelsSection() {
                 <tr key={m.id}>
                   <td className="mono"><strong>{m.id}</strong></td>
                   <td>{m.owned_by === 'unified' ? '统一供应商' : m.owned_by}</td>
+                  <td>
+                    {m.owned_by === 'unified' ? (
+                      <span className="faint">—</span>
+                    ) : (
+                      <Input
+                        type="number"
+                        min={0}
+                        className="table-window"
+                        value={windowValue(m)}
+                        placeholder="200"
+                        disabled={busyId === m.id}
+                        title="上下文窗口(k),留空默认 200k;回车或失焦保存"
+                        onChange={(e) => setDraft((d) => ({ ...d, [m.id]: e.target.value }))}
+                        onBlur={() => void saveWindow(m)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            ;(e.target as HTMLInputElement).blur()
+                          }
+                        }}
+                      />
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -280,11 +344,17 @@ function ModelsSection() {
   )
 }
 
-// 聚合模型:查看各聚合的成员,剔除/添加回供应商。
+// 聚合模型:查看各聚合的成员,剔除/添加回供应商;拖拽调整成员顺序(渠道优先级,
+// 故障转移/负载均衡按此流转);开启/关闭该聚合的轮询负载均衡(默认关闭)。
 function AggregatesSection() {
   const { data, error, loading, reload } = useAsync(() => api.listAggregates())
   const [busyName, setBusyName] = useState('')
   const [notice, setNotice] = useState('')
+  // 开启负载均衡前的确认弹窗。
+  const [confirmLb, setConfirmLb] = useState<AggregateModel | null>(null)
+  // 拖拽状态。
+  const [dragIdx, setDragIdx] = useState<number | null>(null)
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
 
   async function setMembers(agg: AggregateModel, members: string[]) {
     setBusyName(agg.name)
@@ -299,8 +369,39 @@ function AggregatesSection() {
     }
   }
 
+  async function setLoadBalance(agg: AggregateModel, enabled: boolean) {
+    setBusyName(agg.name)
+    try {
+      await api.updateAggregate(agg.name, agg.members, enabled)
+      setNotice(enabled ? `已开启聚合 ${agg.name} 的负载均衡` : `已关闭聚合 ${agg.name} 的负载均衡`)
+      reload()
+    } catch (e) {
+      setNotice(`更新失败: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusyName('')
+    }
+  }
+
+  // 开启需确认(缓存命中率提醒);关闭直接生效。
+  function toggleLb(agg: AggregateModel) {
+    if (agg.load_balance) {
+      void setLoadBalance(agg, false)
+    } else {
+      setConfirmLb(agg)
+    }
+  }
+
+  // 移动成员到新位置(重排优先级)。
+  function moveMember(agg: AggregateModel, from: number, to: number) {
+    if (to < 0 || to >= agg.members.length || from === to) return
+    const next = [...agg.members]
+    const [m] = next.splice(from, 1)
+    next.splice(to, 0, m)
+    void setMembers(agg, next)
+  }
+
   return (
-    <CollapsibleSection title="聚合模型(负载均衡)" actions={<Button variant="ghost" onClick={reload}>刷新</Button>}>
+    <CollapsibleSection title="聚合模型(渠道优先级)" actions={<Button variant="ghost" onClick={reload}>刷新</Button>}>
       {notice ? <div className="alert">{notice}</div> : null}
       {error ? <ErrorAlert text={error} /> : null}
       {loading ? (
@@ -313,8 +414,9 @@ function AggregatesSection() {
             <thead>
               <tr>
                 <th>模型</th>
-                <th>成员</th>
+                <th>成员(拖拽调整优先级)</th>
                 <th>可添加</th>
+                <th>负载均衡</th>
               </tr>
             </thead>
             <tbody>
@@ -323,15 +425,37 @@ function AggregatesSection() {
                   <td className="mono"><strong>{a.name}</strong></td>
                   <td>
                     {a.members.length === 0 ? <span className="faint">-</span> : (
-                      a.members.map((p) => (
-                        <span key={p} className="tag">
-                          <span className="tag-label">{p}</span>
-                          <button type="button" className="tag-x" title={`剔除 ${p}`} disabled={busyName === a.name}
-                            onClick={() => void setMembers(a, a.members.filter((x) => x !== p))}>
-                            <IconX size={11} />
-                          </button>
-                        </span>
-                      ))
+                      <div className="taglist-tags">
+                        {a.members.map((p, i) => (
+                          <span
+                            key={p}
+                            className={`tag tag-draggable${dragIdx === i ? ' tag-dragging' : ''}${dragOverIdx === i ? ' drag-over' : ''}`}
+                            draggable={busyName !== a.name}
+                            onDragStart={() => setDragIdx(i)}
+                            onDragOver={(e) => { e.preventDefault(); setDragOverIdx(i) }}
+                            onDragLeave={() => setDragOverIdx((cur) => (cur === i ? null : cur))}
+                            onDrop={() => {
+                              if (dragIdx !== null) { moveMember(a, dragIdx, i); setDragIdx(null); setDragOverIdx(null) }
+                            }}
+                            onDragEnd={() => { setDragIdx(null); setDragOverIdx(null) }}
+                          >
+                            <span className="tag-grip" title="拖拽调整优先级"><IconGrip size={11} /></span>
+                            <span className="tag-label">{p}</span>
+                            <button type="button" className="tag-move" title="上移" disabled={i === 0 || busyName === a.name}
+                              onClick={() => moveMember(a, i, i - 1)}>
+                              <IconArrowUp size={10} />
+                            </button>
+                            <button type="button" className="tag-move" title="下移" disabled={i === a.members.length - 1 || busyName === a.name}
+                              onClick={() => moveMember(a, i, i + 1)}>
+                              <IconArrowDown size={10} />
+                            </button>
+                            <button type="button" className="tag-x" title={`剔除 ${p}`} disabled={busyName === a.name}
+                              onClick={() => void setMembers(a, a.members.filter((x) => x !== p))}>
+                              <IconX size={11} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </td>
                   <td>
@@ -347,12 +471,44 @@ function AggregatesSection() {
                       ))
                     )}
                   </td>
+                  <td>
+                    <button
+                      type="button"
+                      className={`toggle${a.load_balance ? ' on' : ''}`}
+                      title={a.load_balance ? '关闭负载均衡' : '开启负载均衡'}
+                      disabled={busyName === a.name}
+                      onClick={() => toggleLb(a)}
+                    >
+                      <span className="toggle-knob" />
+                    </button>
+                    <span className="faint" style={{ fontSize: 12, marginLeft: 6 }}>
+                      {a.load_balance ? '轮询' : '优先级'}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      {confirmLb ? (
+        <Modal
+          title="开启负载均衡"
+          onClose={() => setConfirmLb(null)}
+          footer={
+            <>
+              <Button onClick={() => setConfirmLb(null)}>取消</Button>
+              <Button variant="primary" onClick={() => { const a = confirmLb; setConfirmLb(null); void setLoadBalance(a, true) }}>
+                确认开启
+              </Button>
+            </>
+          }
+        >
+          <p>开启负载均衡会大幅降低缓存命中率:轮询请求分散到不同渠道,上游 prompt 缓存基本失效。</p>
+          <p><strong>确认开启 {confirmLb.name} 的负载均衡?</strong></p>
+        </Modal>
+      ) : null}
     </CollapsibleSection>
   )
 }

@@ -111,6 +111,62 @@ func TestDecodeCompletionSSE(t *testing.T) {
 	}
 }
 
+// 上游 completion 流被截断:工具调用参数中途 EOF,且未收到 finish_reason/[DONE]。
+// 解码必须以 StreamError 收尾(并关闭未结束的块),不能假装正常 message_stop——
+// 否则客户端拿到未闭合的 tool_use 块会把残缺工具调用当成功消息,对话静默提前中止。
+func TestDecodeCompletionSSETruncatedToolCall(t *testing.T) {
+	input := "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Edit\",\"arguments\":\"\"}}]}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"replace_all\\\":false,\\\"file_path\\\":\\\"G:\\\\x\"}}]}}]}\n\n"
+	// 无 [DONE]、无 finish_reason —— 流在此 EOF。
+	evs := collectDecoded(t, FormatCompletion, input)
+
+	if len(evs) == 0 || evs[len(evs)-1].Type != StreamError {
+		t.Fatalf("last event = %+v, want StreamError (truncated stream); events:\n%+v", lastOrNil(evs), evs)
+	}
+	if lastOrNil(evs).Error == "" {
+		t.Errorf("StreamError should carry a message, got %+v", lastOrNil(evs))
+	}
+	// 不能出现正常结束的 message_stop。
+	for _, e := range evs {
+		if e.Type == StreamMessageStop {
+			t.Errorf("truncated stream must not emit StreamMessageStop; got %+v", evs)
+		}
+	}
+	// 已打开的 tool_use 块应被关闭(content_block_stop),结构完整。
+	stopCount := 0
+	for _, e := range evs {
+		if e.Type == StreamContentStop {
+			stopCount++
+		}
+	}
+	if stopCount < 1 {
+		t.Errorf("truncated stream should close open blocks, got events:\n%+v", evs)
+	}
+	// 端到端:经 anthropic 编码器(Claude Code 客户端格式)必须输出 error 事件,
+	// 而非静默 message_stop——否则客户端把残缺工具调用当成功消息,对话提前中止。
+	var sb strings.Builder
+	for _, e := range evs {
+		if err := EncodeAnthropicSSE(&sb, e); err != nil {
+			t.Fatalf("encode anthropic: %v", err)
+		}
+	}
+	out := sb.String()
+	if !strings.Contains(out, "event: error") || !strings.Contains(out, "upstream stream ended") {
+		t.Errorf("converted anthropic output should surface truncation error, got:\n%s", out)
+	}
+	if strings.Contains(out, "message_stop") {
+		t.Errorf("converted anthropic output must not emit message_stop for truncated stream:\n%s", out)
+	}
+}
+
+func lastOrNil(evs []StreamEvent) StreamEvent {
+	if len(evs) == 0 {
+		return StreamEvent{}
+	}
+	return evs[len(evs)-1]
+}
+
 // 工具参数先于 id/name 到达、并行工具交错、OpenRouter 多发 finish_reason 的场景。
 func TestDecodeCompletionSSEToolEdgeCases(t *testing.T) {
 	input := "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n" +

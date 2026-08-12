@@ -64,6 +64,20 @@ func TestModelsDerivation(t *testing.T) {
 
 func TestNextRoundRobin(t *testing.T) {
 	am, _ := newMgr(t)
+	// 负载均衡默认关闭:固定优先级(字母序首位 azure),不轮询。
+	for i := 0; i < 4; i++ {
+		m, ok := am.Next("gpt-4o")
+		if !ok {
+			t.Fatal("Next should be ok")
+		}
+		if m != "azure" {
+			t.Fatalf("Next with lb off = %q, want azure (fixed priority)", m)
+		}
+	}
+	// 开启负载均衡后轮询。
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
 	seen := map[string]int{}
 	for i := 0; i < 4; i++ {
 		m, ok := am.Next("gpt-4o")
@@ -162,7 +176,17 @@ func TestConcurrentNext(t *testing.T) {
 
 func TestTryOrderRotation(t *testing.T) {
 	am, _ := newMgr(t)
-	// gpt-4o 成员 [azure openai],轮询起点推进。
+	// 负载均衡默认关闭:每次返回固定优先级序 [azure openai],不轮询。
+	for i := 0; i < 3; i++ {
+		order, ok := am.TryOrder("gpt-4o")
+		if !ok || len(order) != 2 || order[0] != "azure" || order[1] != "openai" {
+			t.Errorf("TryOrder with lb off = %v, want [azure openai] (fixed)", order)
+		}
+	}
+	// 开启负载均衡后轮询起点推进。
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
 	first, ok := am.TryOrder("gpt-4o")
 	if !ok || len(first) != 2 || first[0] != "azure" || first[1] != "openai" {
 		t.Errorf("first TryOrder = %v, want [azure openai]", first)
@@ -220,5 +244,113 @@ func TestCooldownExpiry(t *testing.T) {
 	order, ok := am.TryOrder("gpt-4o")
 	if !ok || len(order) != 2 {
 		t.Errorf("after expiry TryOrder = %v, want both members back", order)
+	}
+}
+
+// Members 只读:不推进轮询、不跳过冷却。用于直通判定的"全量成员"查询。
+func TestMembersNoSideEffect(t *testing.T) {
+	am, _ := newMgr(t)
+	members, ok := am.Members("gpt-4o")
+	if !ok || len(members) != 2 || members[0] != "azure" || members[1] != "openai" {
+		t.Fatalf("Members = %v, want [azure openai]", members)
+	}
+	// 冷却成员仍出现在 Members(全量判定);但 TryOrder 会跳过冷却成员。
+	am.Ban("gpt-4o", "azure")
+	members, ok = am.Members("gpt-4o")
+	if !ok || len(members) != 2 {
+		t.Errorf("Members after ban should still return full set, got %v", members)
+	}
+	// 轮询位置不被 Members 推进:开启负载均衡后,首次 TryOrder 从首成员开始、
+	// 第二次旋转,证明轮询仅由 TryOrder 推进(Members 未推进)。
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
+	// azure 在冷却中,被 TryOrder 跳过;首次应从剩余成员 openai 开始(证明起点未因 Members 旋转)。
+	if order, _ := am.TryOrder("gpt-4o"); order[0] != "openai" {
+		t.Errorf("TryOrder after Members should start at openai (azure cooled), got %v", order)
+	}
+	// 未知模型返回 false。
+	if _, ok := am.Members("no-such"); ok {
+		t.Error("unknown model Members should be false")
+	}
+}
+
+// SetMembers 的传入顺序即渠道优先级,持久化并在重载后保持。
+func TestMembersOrderPersists(t *testing.T) {
+	pm, err := provider.NewManager(filepath.Join(t.TempDir(), "p.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"openai", "azure"} {
+		if err := pm.Add(provider.Config{Kind: provider.KindCompletion, Name: name, BaseURL: "http://x", Models: []provider.ModelConfig{{Name: "gpt-4o"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(t.TempDir(), "aggregates.json")
+	am, err := NewManager(file, pm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 指定优先级:openai 在前(字母序本为 azure 在前)。
+	if err := am.SetMembers("gpt-4o", []string{"openai", "azure"}); err != nil {
+		t.Fatal(err)
+	}
+	if members, _ := am.Members("gpt-4o"); members[0] != "openai" || members[1] != "azure" {
+		t.Fatalf("Members = %v, want [openai azure] (priority order)", members)
+	}
+	// 关闭负载均衡时按优先级固定流转(不轮询)。
+	if order, _ := am.TryOrder("gpt-4o"); order[0] != "openai" {
+		t.Errorf("TryOrder = %v, want [openai azure] fixed", order)
+	}
+	// 重载后顺序保持。
+	am2, err := NewManager(file, pm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if members, _ := am2.Members("gpt-4o"); members[0] != "openai" || members[1] != "azure" {
+		t.Errorf("after reload Members = %v, want [openai azure]", members)
+	}
+	// 顺序只覆盖提供的成员;重新设置成员后顺序随之更新。
+	if err := am2.SetMembers("gpt-4o", []string{"azure"}); err != nil {
+		t.Fatal(err)
+	}
+	if members, _ := am2.Members("gpt-4o"); len(members) != 1 || members[0] != "azure" {
+		t.Errorf("after re-set Members = %v, want [azure]", members)
+	}
+}
+
+// SetLoadBalance 持久化:重载后开关保持。
+func TestSetLoadBalancePersists(t *testing.T) {
+	pm, err := provider.NewManager(filepath.Join(t.TempDir(), "p.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Add(provider.Config{Kind: provider.KindCompletion, Name: "openai", BaseURL: "http://x", Models: []provider.ModelConfig{{Name: "gpt-4o"}}}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "aggregates.json")
+	am, err := NewManager(file, pm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if am.LoadBalanceOf("gpt-4o") {
+		t.Error("load balance should default to off")
+	}
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
+	if !am.LoadBalanceOf("gpt-4o") {
+		t.Error("load balance should be on after SetLoadBalance")
+	}
+	if err := am.SetLoadBalance("no-such", true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetLoadBalance unknown err = %v, want ErrNotFound", err)
+	}
+	// 持久化:重载后开关保持 true。
+	am2, err := NewManager(file, pm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !am2.LoadBalanceOf("gpt-4o") {
+		t.Error("after reload load balance should be on")
 	}
 }

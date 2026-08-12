@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -80,6 +81,48 @@ func TestResolveDeploymentPublicAddrBase(t *testing.T) {
 	}
 	if !st.Remote || st.AdvertisedBase != "https://gw.example.com" {
 		t.Errorf("network = %+v, want remote with advertised_base https://gw.example.com", st)
+	}
+}
+
+func TestDefaultLogName(t *testing.T) {
+	name := defaultLogName()
+	// 每次运行以启动时间戳命名:gateway-<YYYYMMDD-HHMMSS>.log.jsonl。
+	if !regexp.MustCompile(`^gateway-\d{8}-\d{6}\.log\.jsonl$`).MatchString(name) {
+		t.Errorf("defaultLogName() = %q, want gateway-<timestamp>.log.jsonl", name)
+	}
+}
+
+func TestResolveLogDetail(t *testing.T) {
+	// 显式 flag 优先。
+	if got := resolveLogDetail(true, "full", ""); got != server.LogDetailFull {
+		t.Errorf("explicit full = %q", got)
+	}
+	if got := resolveLogDetail(true, "default", ""); got != server.LogDetailDefault {
+		t.Errorf("explicit default = %q", got)
+	}
+	// 显式非法 flag → 回落 default。
+	if got := resolveLogDetail(true, "nope", ""); got != server.LogDetailDefault {
+		t.Errorf("invalid explicit = %q, want default", got)
+	}
+	// 未显式传:读持久化文件。
+	file := filepath.Join(t.TempDir(), "logdetail.json")
+	if err := os.WriteFile(file, []byte(`{"detail":"full"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveLogDetail(false, "", file); got != server.LogDetailFull {
+		t.Errorf("persisted full = %q", got)
+	}
+	// 持久化文件缺失 → default。
+	if got := resolveLogDetail(false, "", filepath.Join(t.TempDir(), "none.json")); got != server.LogDetailDefault {
+		t.Errorf("missing file = %q, want default", got)
+	}
+	// 持久化文件非法 → default。
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte(`not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveLogDetail(false, "", bad); got != server.LogDetailDefault {
+		t.Errorf("bad file = %q, want default", got)
 	}
 }
 

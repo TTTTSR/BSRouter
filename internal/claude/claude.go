@@ -365,6 +365,19 @@ func (c Config) EnvVars() map[string]string {
 	return out
 }
 
+// ContextSuffix 把上下文窗口(k 为单位)转换为 Claude Code 模型名后缀:
+// 整千(1000/2000/...)用 [Nm],其余用 [Nk](如 128→"[128k]"、1000→"[1m]")。
+// k<=0 返回空串(不加后缀,Claude Code 对自定义模型默认按 200k 处理)。
+func ContextSuffix(k int) string {
+	if k <= 0 {
+		return ""
+	}
+	if k >= 1000 && k%1000 == 0 {
+		return fmt.Sprintf("[%dm]", k/1000)
+	}
+	return fmt.Sprintf("[%dk]", k)
+}
+
 // DefaultSettingsPath 返回本地 Claude Code 的 settings.json 路径(用户主目录下的 .claude)。
 func DefaultSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()

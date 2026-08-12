@@ -31,22 +31,31 @@ const maxUpstreamBody = 100 << 20 // 100 MB
 // ErrNotConfigured 表示执行操作所需的配置未设置(如 usage_url)。
 var ErrNotConfigured = errors.New("provider: not configured")
 
-// ModelConfig 是供应商下的一个模型:可单独指定接口格式,留空表示使用供应商默认 Kind。
+// ModelConfig 是供应商下的一个模型:可单独指定一个或多个支持的接口格式,
+// 留空表示使用供应商默认 Kind。Kinds(多格式)优先于 Kind(旧单格式字段)。
+// ContextWindow 为该模型的上下文窗口(k 为单位,如 128 表示 128k;0 留空 = 默认 200k),
+// 应用 Claude Code / Codex 预设时据此生成模型名后缀与目录条目窗口。
 type ModelConfig struct {
-	Name string `json:"name"`
-	Kind Kind   `json:"kind,omitempty"`
+	Name          string `json:"name"`
+	Kind          Kind   `json:"kind,omitempty"`
+	Kinds         []Kind `json:"kinds,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
 }
 
-// UnmarshalJSON 兼容新对象形式 {"name":...,"kind":...} 与旧格式的纯字符串模型名,
-// 使旧版 providers.json("models":["gpt-4o"])在升级后仍可加载。
+// UnmarshalJSON 兼容新对象形式 {"name":...,"kind":...,"kinds":[...],"context_window":...}
+// 与旧格式的纯字符串模型名,使旧版 providers.json("models":["gpt-4o"])在升级后仍可加载。
 func (m *ModelConfig) UnmarshalJSON(data []byte) error {
 	var obj struct {
-		Name string `json:"name"`
-		Kind Kind   `json:"kind"`
+		Name          string `json:"name"`
+		Kind          Kind   `json:"kind"`
+		Kinds         []Kind `json:"kinds"`
+		ContextWindow int    `json:"context_window"`
 	}
 	if err := json.Unmarshal(data, &obj); err == nil {
 		m.Name = obj.Name
 		m.Kind = obj.Kind
+		m.Kinds = obj.Kinds
+		m.ContextWindow = obj.ContextWindow
 		return nil
 	}
 	var s string
@@ -110,6 +119,14 @@ func (c Config) Validate() error {
 		if m.Kind != "" && !validKind(m.Kind) {
 			return fmt.Errorf("provider %q: model %q: unknown kind %q", c.Name, m.Name, m.Kind)
 		}
+		for _, k := range m.Kinds {
+			if !validKind(k) {
+				return fmt.Errorf("provider %q: model %q: unknown kind %q", c.Name, m.Name, k)
+			}
+		}
+		if m.ContextWindow < 0 {
+			return fmt.Errorf("provider %q: model %q: context_window must be >= 0", c.Name, m.Name)
+		}
 	}
 	// 可选的探针 URL 必须是合法的 http(s) 地址,避免 file:// 等非网络协议。
 	for name, u := range map[string]string{"usage_url": c.UsageURL, "models_url": c.ModelsURL} {
@@ -140,14 +157,50 @@ func (b *BaseProvider) Name() string { return b.cfg.Name }
 // Kind 返回供应商默认的接口格式。
 func (b *BaseProvider) Kind() Kind { return b.cfg.Kind }
 
-// ModelKind 返回指定模型实际使用的接口格式:模型自带则用之,否则回退供应商默认。
-func (b *BaseProvider) ModelKind(model string) Kind {
+// ModelKinds 返回指定模型支持的接口格式集合(优先级顺序,去重):
+// 模型级 Kinds 优先,其次模型级 Kind(旧单格式字段),最后回退供应商默认 Kind。恒返回 ≥1 项。
+func (b *BaseProvider) ModelKinds(model string) []Kind {
+	var kinds []Kind
 	for _, m := range b.cfg.Models {
-		if m.Name == model && m.Kind != "" {
-			return m.Kind
+		if m.Name != model {
+			continue
+		}
+		if len(m.Kinds) > 0 {
+			kinds = m.Kinds
+		} else if m.Kind != "" {
+			kinds = []Kind{m.Kind}
+		}
+		break
+	}
+	if len(kinds) == 0 {
+		kinds = []Kind{b.cfg.Kind}
+	}
+	// 去重保序。
+	out := make([]Kind, 0, len(kinds))
+	seen := make(map[Kind]bool, len(kinds))
+	for _, k := range kinds {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
+}
+
+// ModelKind 返回指定模型实际使用的接口格式:多格式时取第一个(转换路径选上游格式)。
+func (b *BaseProvider) ModelKind(model string) Kind {
+	return b.ModelKinds(model)[0]
+}
+
+// Supports 判断模型是否支持请求的接口格式(直通判定用)。
+func (b *BaseProvider) Supports(model string, format Kind) bool {
+	for _, k := range b.ModelKinds(model) {
+		if k == format {
+			return true
 		}
 	}
-	return b.cfg.Kind
+	return false
 }
 
 // Models 返回该供应商的模型列表(含各自的接口格式)。
@@ -174,6 +227,35 @@ func (b *BaseProvider) Stream(ctx context.Context, req *gateway.Request) (io.Rea
 		return nil, err
 	}
 	return p.Stream(ctx, req)
+}
+
+// CompleteRaw 以指定接口格式发送原始 wire 请求体并返回原始响应体与上游状态码(不解析)。
+// 供直通路径使用:模型支持该格式时,请求体不经中间层转换,原样转发。
+func (b *BaseProvider) CompleteRaw(ctx context.Context, format Kind, raw json.RawMessage) (int, []byte, error) {
+	switch format {
+	case KindAnthropic:
+		return b.anthropic.CompleteRaw(ctx, raw)
+	case KindCompletion:
+		return b.completion.CompleteRaw(ctx, raw)
+	case KindResponses:
+		return b.responses.CompleteRaw(ctx, raw)
+	default:
+		return 0, nil, fmt.Errorf("provider %q: unsupported kind %q", b.cfg.Name, format)
+	}
+}
+
+// StreamRaw 以指定接口格式发送原始流式请求体并返回上游 SSE 响应体(调用方负责 Close)。
+func (b *BaseProvider) StreamRaw(ctx context.Context, format Kind, raw json.RawMessage) (*http.Response, error) {
+	switch format {
+	case KindAnthropic:
+		return b.anthropic.StreamRaw(ctx, raw)
+	case KindCompletion:
+		return b.completion.StreamRaw(ctx, raw)
+	case KindResponses:
+		return b.responses.StreamRaw(ctx, raw)
+	default:
+		return nil, fmt.Errorf("provider %q: unsupported kind %q", b.cfg.Name, format)
+	}
 }
 
 // adapterFor 返回请求模型对应的格式适配器。
@@ -313,15 +395,20 @@ func truncate(b []byte) string {
 	return string(b)
 }
 
-// Provider 是供应商接口:嵌入已有的 gateway.Provider(即 Complete),并暴露元信息
-// 与上游探测能力(连通性 / 模型列表 / 用量查询)。
+// Provider 是供应商接口:嵌入已有的 gateway.Provider(即 Complete),并暴露元信息、
+// 接口格式查询与上游探测能力(连通性 / 模型列表 / 用量查询)。CompleteRaw/StreamRaw
+// 供直通路径使用(模型支持请求格式时原样转发,不经中间层转换)。
 type Provider interface {
 	gateway.Provider
 	Name() string
 	Kind() Kind
+	ModelKinds(model string) []Kind
 	ModelKind(model string) Kind
+	Supports(model string, format Kind) bool
 	Models() []ModelConfig
 	Config() Config
+	CompleteRaw(ctx context.Context, format Kind, raw json.RawMessage) (int, []byte, error)
+	StreamRaw(ctx context.Context, format Kind, raw json.RawMessage) (*http.Response, error)
 	Ping(ctx context.Context) (*PingResult, error)
 	FetchModels(ctx context.Context) ([]string, error)
 	QueryUsage(ctx context.Context) (json.RawMessage, error)

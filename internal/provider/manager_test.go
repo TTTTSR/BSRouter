@@ -173,16 +173,20 @@ func TestManagerSetModels(t *testing.T) {
 
 func TestStripContextMarker(t *testing.T) {
 	cases := map[string]string{
-		"gpt-4o":                "gpt-4o",
-		"gpt-4o[1M]":            "gpt-4o",
-		"deepseek-v4-flash[1m]": "deepseek-v4-flash",
-		"deepseek-v4-flash[2M]": "deepseek-v4-flash",
-		"openai@gpt-4o[1M]":     "openai@gpt-4o",
-		"a[1M]":                 "a",
-		"x[10m]":                "x[10m]", // 仅 [1m]/[2m] 被剥离
-		"y[3M]":                 "y[3M]",  // 非 1m/2m 不剥
-		"z[foo]":                "z[foo]", // 非上下文标记不剥
-		"plain":                 "plain",
+		"gpt-4o":                 "gpt-4o",
+		"gpt-4o[1M]":             "gpt-4o",
+		"deepseek-v4-flash[1m]":  "deepseek-v4-flash",
+		"deepseek-v4-flash[2M]":  "deepseek-v4-flash",
+		"openai@gpt-4o[1M]":      "openai@gpt-4o",
+		"a[1M]":                  "a",
+		"x[10m]":                 "x",           // 任意 [Nk]/[Nm] 数字标记被剥离
+		"y[3M]":                  "y",           // 大小写不敏感
+		"deepseek-v4-flash[128k]": "deepseek-v4-flash", // 按上下文窗口派生的 [Nk] 后缀
+		"deepseek-v4-flash[200k]": "deepseek-v4-flash",
+		"deepseek-v4-flash[1000000]": "deepseek-v4-flash", // 裸数字也视为标记
+		"z[foo]":                 "z[foo]",      // 非数字标记不剥
+		"z[1.5k]":                "z[1.5k]",     // 非法数字不剥
+		"plain":                  "plain",
 	}
 	for in, want := range cases {
 		if got := StripContextMarker(in); got != want {

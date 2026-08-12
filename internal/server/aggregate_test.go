@@ -159,6 +159,10 @@ func TestAggregateRoundRobin(t *testing.T) {
 		t.Fatal(err)
 	}
 	am := newAggMgr(t, pm)
+	// 负载均衡默认关闭,开启后轮询。
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(New(pm).WithAggregates(am).Handler())
 	defer srv.Close()
 
@@ -203,6 +207,10 @@ func TestAggregateRoundRobinWithMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	am := newAggMgr(t, pm)
+	// 负载均衡默认关闭,开启后轮询。
+	if err := am.SetLoadBalance("gpt-4o", true); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(New(pm).WithAggregates(am).Handler())
 	defer srv.Close()
 

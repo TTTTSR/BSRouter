@@ -3,7 +3,7 @@
 大模型网关（LLM Gateway）——为 **agent 使用者**提供统一接入入口，连接来自不同供应商的大模型服务（OpenAI、Anthropic、Azure OpenAI、国内厂商等），屏蔽各供应商 API 的差异。
 
 - **三种接口格式互通**：Anthropic Messages / OpenAI chat.completions / responses，请求响应格式由客户端决定，上游任意。
-- **内置 Web 界面**：黑白灰扁平管理 UI，管理供应商、模型分组、日志、API Key、Claude Code 预设。
+- **内置 Web 界面**：黑白灰扁平管理 UI，管理供应商、模型分组、日志、API Key、Claude Code / Codex 预设。
 - **单二进制分发**：前端经 `go:embed` 内嵌，编译后一个可执行文件即可运行。
 - **零外部依赖**：纯 Go 标准库实现。
 
@@ -52,7 +52,7 @@ go test ./... -race     # 竞态检测
 
 ## 配置文件位置
 
-全部配置（`providers.json` / `groups.json` / `keys.json` / `claude.json` / `aggregates.json`）与请求日志 `gateway.log.jsonl` 默认存 **OS 用户配置目录**（跨平台惯例，Go `os.UserConfigDir()`）：
+全部配置（`providers.json` / `groups.json` / `keys.json` / `claude.json` / `codex.json` / `aggregates.json`）与请求日志 `gateway.log.jsonl` 默认存 **OS 用户配置目录**（跨平台惯例，Go `os.UserConfigDir()`）：
 
 ```
 Windows: %APPDATA%\BSRouter\
@@ -106,6 +106,10 @@ Linux:   ~/.config/BSRouter/
 
 预设若干 Claude Code 运行配置（镜像 settings.json 的 `env` 块），一键生成 PowerShell / bash 启动命令，实现多终端环境分隔。预设不填密钥时，命令端点自动注入系统默认 key。
 
+### OpenAI Codex 配置预设（`codex.json`）
+
+预设绑定虚拟运营商（统一 API / 分组），一键复制 `codex -c` 覆盖启动命令（不写文件），或覆盖本地 `~/.codex/config.toml`（单一 `[model_providers.bsrouter]` 块）+ `~/.codex/auth.json`（密钥写入 `OPENAI_API_KEY`，codex 借此跳过 ChatGPT 登录）+ `~/.codex/bsrouter-models.json`（生成模型目录，codex TUI 列出网关全部模型）。codex 无模型档位映射，模型由交互选择；密钥未配置时自动注入系统默认 key。
+
 ## API
 
 统一 API（客户端将 base_url 设为 `http://<host>/api`，再调用标准路径）：
@@ -115,9 +119,9 @@ Linux:   ~/.config/BSRouter/
 | POST | `/api/v1/messages` | Anthropic 格式 |
 | POST | `/api/v1/chat/completions` | chat.completions 格式 |
 | POST | `/api/v1/responses` | responses 格式 |
-| GET  | `/api/v1/models` | 聚合所有供应商模型 |
+| GET  | `/api/v1/models` | 聚合所有供应商模型（公开,无需鉴权） |
 
-管理接口位于 `/manage/v1/*`（供应商增删改查、连通性探测、分组、日志、受管 key、Claude 预设、聚合模型、部署状态）。
+管理接口位于 `/manage/v1/*`（供应商增删改查、连通性探测、分组、日志、受管 key、Claude / Codex 预设、聚合模型、部署状态）。
 
 ## 远程部署
 
@@ -138,6 +142,7 @@ internal/group/     # 模型分组:虚拟供应商 + Manager
 internal/aggregate/ # 聚合模型:成员派生 + 剔除名单 + 轮询 + 故障转移冷却
 internal/apikey/    # 受管 API Key
 internal/claude/    # Claude Code 配置预设 + 命令生成
+internal/codex/     # OpenAI Codex 配置预设 + -c 命令生成 + TOML 合并
 internal/network/   # 部署形态检测(仅网卡)+ 出口地址持久化
 internal/server/    # 网关 HTTP 服务:转发 + 管理 + 探测 + 分组 + 日志 + SPA 挂载
 internal/logger/    # JSONL 请求日志

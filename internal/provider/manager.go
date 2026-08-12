@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -202,7 +203,11 @@ func (m *Manager) List() []Config {
 	return m.snapshot()
 }
 
-// StripContextMarker 剥离模型 id 末尾的上下文标记(如 [1M] / [2m],大小写不敏感)。
+// contextMarkerRe 匹配上下文标记的内容:[<数字>] / [<数字>k] / [<数字>m],大小写不敏感。
+// 覆盖 Claude Code 的 [1M] 以及按上下文窗口派生的 [128k] / [200k] / [1m] 等后缀。
+var contextMarkerRe = regexp.MustCompile(`(?i)^\d+(?:k|m)?$`)
+
+// StripContextMarker 剥离模型 id 末尾的上下文标记(如 [1M] / [128k] / [200k] / [1m])。
 // 该标记是 Claude Code 客户端侧的上下文窗口声明,真实上游通常不接受带标记的模型名
 // (Anthropic/Bedrock 会 400、OpenAI 兼容接口拒绝、部分厂商启发式回退),网关需在
 // 路由/转发前剥掉;幂等——若已剥离则原样返回。
@@ -212,7 +217,7 @@ func StripContextMarker(model string) string {
 		return model
 	}
 	tag := model[i+1 : len(model)-1]
-	if len(tag) == 2 && (tag[0] == '1' || tag[0] == '2') && (tag[1] == 'm' || tag[1] == 'M') {
+	if contextMarkerRe.MatchString(tag) {
 		return model[:i]
 	}
 	return model
