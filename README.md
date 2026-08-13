@@ -66,6 +66,37 @@ go run ./cmd/gateway -api-key <key>
 
 启动后访问 `http://127.0.0.1:18154/` 打开管理界面，输入网关 API Key 登录（未配置 key 时网关不鉴权，适合纯本地使用）。
 
+#### 启动参数
+
+`go run ./cmd/gateway`（或编译后的二进制）支持的完整参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-addr` | `127.0.0.1:18154` | HTTP 监听地址。**默认仅绑定本机回环**，避免管理/转发端点直接暴露到局域网；需局域网或公网访问时改为 `:18154` 或 `0.0.0.0:18154`（部署形态与广告地址见「远程部署」） |
+| `-private` | — | 自动生成随机 API Key（64 位 hex）并打印，用于登录/调用 |
+| `-api-key <key>` | `GATEWAY_API_KEY` 环境变量 | 显式指定网关 API Key；不加 `-private`/`-api-key` 时网关**不鉴权** |
+| `-config <path>` | 配置目录 `providers.json` | 供应商配置（相对当前运行目录解析；任一配置参数显式传路径即覆盖默认并跳过运行目录迁移） |
+| `-groups <path>` | 配置目录 `groups.json` | 模型分组配置，传空串禁用 |
+| `-keys <path>` | 配置目录 `keys.json` | 受管 API Key 配置，传空串禁用 |
+| `-claude <path>` | 配置目录 `claude.json` | Claude Code 配置预设，传空串禁用 |
+| `-codex <path>` | 配置目录 `codex.json` | Codex 配置预设，传空串禁用 |
+| `-aggregates <path>` | 配置目录 `aggregates.json` | 聚合模型配置，传空串禁用 |
+| `-network <path>` | 配置目录 `network.json` | 出口地址配置（NAT 部署下用户填写的出口 IP 与映射端口），传空串禁用 |
+| `-log <path>` | 配置目录 `gateway-<时间戳>.log.jsonl` | 请求日志（JSONL），传空串禁用；显式传路径继续追加不截断 |
+| `-log-detail <default\|full>` | `default` | 日志完整度：`default` 仅出错时记录完整转发详情，`full` 全部记录 |
+| `-log-detail-file <path>` | 配置目录 `logdetail.json` | 日志完整度持久化文件，传空串禁用 |
+| `-public-addr <URL>` | — | 手工覆盖对外广告地址（如 `https://gw.example.com` 或 `http://1.2.3.4:443`），最高优先，NAT/反向代理下自动检测不到时使用 |
+| `-claude-settings <path>` | `~/.claude/settings.json` | 「应用本地」覆盖 Claude Code 配置的目标路径 |
+| `-codex-config <path>` | `~/.codex/config.toml` | 「应用本地」覆盖 Codex config.toml 的目标路径 |
+| `-codex-auth <path>` | `~/.codex/auth.json` | 「应用本地」覆盖 Codex auth.json 的目标路径 |
+| `-codex-model-catalog <path>` | `~/.codex/bsrouter-models.json` | 「应用本地」覆盖 Codex 模型目录的目标路径 |
+| `-codex-models-cache <path>` | `~/.codex/models_cache.json` | 「应用本地」覆盖 Codex 模型缓存的目标路径 |
+| `-stream-idle-timeout <duration>` | `0`（禁用） | 上游流式 idle 超时：两字节数据到达间隔超过该值即中止流（思考模型可能长时间无增量，启用建议 ≥120s） |
+| `-stream-retries <n>` | `2` | 流开始前失败（5xx/传输错误）每成员重试次数，`0` 关闭 |
+| `-version` | — | 打印版本并退出 |
+
+> 一键安装的 `bsr` 命令行同样支持透传以上参数，如 `bsr start -addr :9000 -api-key sk-...`。
+
 #### 常用命令
 
 ```bash
@@ -348,6 +379,37 @@ go run ./cmd/gateway -api-key <key>
 ```
 
 After startup, open `http://127.0.0.1:18154/` to use the management UI and log in with the gateway API key (with no key configured, the gateway runs unauthenticated — suitable for purely local use).
+
+#### Startup Flags
+
+Complete set of flags for `go run ./cmd/gateway` (or the compiled binary):
+
+| Flag | Default | Description |
+|---|---|---|
+| `-addr` | `127.0.0.1:18154` | HTTP listen address. **By default binds loopback only**, so the management and forwarding endpoints are not exposed to the LAN; use `:18154` or `0.0.0.0:18154` for LAN/public access (deployment mode and advertised base, see "Remote Deployment") |
+| `-private` | — | Auto-generate a random API key (64 hex chars) and print it for login/API calls |
+| `-api-key <key>` | `GATEWAY_API_KEY` env var | Use an explicit gateway API key; without `-private`/`-api-key` the gateway runs **unauthenticated** |
+| `-config <path>` | `providers.json` in config dir | Provider config (resolved relative to the working directory; passing any config flag explicitly overrides the default and skips run-dir migration) |
+| `-groups <path>` | `groups.json` in config dir | Model group config; empty string disables |
+| `-keys <path>` | `keys.json` in config dir | Managed API key config; empty string disables |
+| `-claude <path>` | `claude.json` in config dir | Claude Code preset config; empty string disables |
+| `-codex <path>` | `codex.json` in config dir | Codex preset config; empty string disables |
+| `-aggregates <path>` | `aggregates.json` in config dir | Aggregate model config; empty string disables |
+| `-network <path>` | `network.json` in config dir | Egress address config (egress IP + mapped port filled in on NAT deployments); empty string disables |
+| `-log <path>` | `gateway-<timestamp>.log.jsonl` in config dir | Request log (JSONL); empty string disables; an explicit path appends without truncation |
+| `-log-detail <default\|full>` | `default` | Log detail level: `default` records full forward detail only on errors, `full` for every request |
+| `-log-detail-file <path>` | `logdetail.json` in config dir | Log-detail-level persistence file; empty string disables |
+| `-public-addr <URL>` | — | Manually override the advertised base URL (e.g. `https://gw.example.com` or `http://1.2.3.4:443`); highest priority, for NAT/reverse-proxy deployments that auto-detection cannot find |
+| `-claude-settings <path>` | `~/.claude/settings.json` | Target path for "apply-local" to override Claude Code config |
+| `-codex-config <path>` | `~/.codex/config.toml` | Target path for "apply-local" to override Codex config.toml |
+| `-codex-auth <path>` | `~/.codex/auth.json` | Target path for "apply-local" to override Codex auth.json |
+| `-codex-model-catalog <path>` | `~/.codex/bsrouter-models.json` | Target path for "apply-local" to override the Codex model catalog |
+| `-codex-models-cache <path>` | `~/.codex/models_cache.json` | Target path for "apply-local" to override the Codex models cache |
+| `-stream-idle-timeout <duration>` | `0` (disabled) | Upstream stream idle timeout: aborts the stream when no data arrives for this long (thinking models may emit nothing for a while; ≥120s recommended when enabled) |
+| `-stream-retries <n>` | `2` | Retries per member for pre-stream failures (5xx / transport errors); `0` disables |
+| `-version` | — | Print version and exit |
+
+> The `bsr` CLI from the one-click install forwards these flags too, e.g. `bsr start -addr :9000 -api-key sk-...`.
 
 #### Common Commands
 
