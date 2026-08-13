@@ -323,15 +323,16 @@ func (r *Response) ToResponses() *ResponsesResponse {
 
 // ResponsesProvider 通过 OpenAI responses 接口发送请求。
 type ResponsesProvider struct {
-	baseURL string
-	apiKey  string
-	httpc   *http.Client
+	baseURL  string
+	basePath string
+	apiKey   string
+	httpc    *http.Client
 }
 
 // NewResponsesProvider 基于共享配置构造 responses 适配器。
 func NewResponsesProvider(c *Client) *ResponsesProvider {
-	baseURL, apiKey, httpc := resolveClient(c, "https://api.openai.com")
-	return &ResponsesProvider{baseURL: baseURL, apiKey: apiKey, httpc: httpc}
+	baseURL, basePath, apiKey, httpc := resolveClient(c, "https://api.openai.com")
+	return &ResponsesProvider{baseURL: baseURL, basePath: basePath, apiKey: apiKey, httpc: httpc}
 }
 
 // Complete 实现 Provider 接口。
@@ -342,7 +343,7 @@ func (p *ResponsesProvider) Complete(ctx context.Context, req *Request) (*Respon
 	wire := req.ToResponses()
 	var resp ResponsesResponse
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	if err := doJSON(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, wire, &resp); err != nil {
+	if err := doJSON(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/responses"), headers, wire, &resp); err != nil {
 		return nil, err
 	}
 	return resp.ToInternal(), nil
@@ -351,7 +352,7 @@ func (p *ResponsesProvider) Complete(ctx context.Context, req *Request) (*Respon
 // CompleteRaw 发送原始 wire 请求体(直通)并返回原始响应体与上游状态码,不解析。
 func (p *ResponsesProvider) CompleteRaw(ctx context.Context, raw json.RawMessage) (int, []byte, error) {
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	return doRaw(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, raw)
+	return doRaw(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/responses"), headers, raw)
 }
 
 // Stream 发送流式请求(stream:true)并返回上游 SSE 响应体,调用方负责 Close。
@@ -361,7 +362,7 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *Request) (io.ReadCl
 	}
 	wire := req.ToResponses()
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	resp, err := doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, wire)
+	resp, err := doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/responses"), headers, wire)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +378,7 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req *Request) (io.ReadCl
 // 非 2xx 由调用方检查 resp.StatusCode 并读取/关闭响应体。
 func (p *ResponsesProvider) StreamRaw(ctx context.Context, raw json.RawMessage) (*http.Response, error) {
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	return doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/responses", headers, json.RawMessage(raw))
+	return doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/responses"), headers, json.RawMessage(raw))
 }
 
 // Do 实现 Requester 接口:responses 请求体可直接发起请求。

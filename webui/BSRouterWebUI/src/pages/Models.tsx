@@ -313,7 +313,13 @@ function ModelsSection() {
                   <td>{m.owned_by === 'unified' ? '统一供应商' : m.owned_by}</td>
                   <td>
                     {m.owned_by === 'unified' ? (
-                      <span className="faint">—</span>
+                      m.context_window ? (
+                        <span className="mono" title="聚合模型:上下文窗口取全部有效成员的最小值,不可直接编辑">
+                          {m.context_window}k
+                        </span>
+                      ) : (
+                        <span className="faint">—</span>
+                      )
                     ) : (
                       <Input
                         type="number"

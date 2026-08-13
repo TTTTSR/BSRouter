@@ -368,15 +368,16 @@ func (r *Response) ToAnthropic() *AnthropicResponse {
 
 // AnthropicProvider 通过 Anthropic Messages API 发送请求。
 type AnthropicProvider struct {
-	baseURL string
-	apiKey  string
-	httpc   *http.Client
+	baseURL  string
+	basePath string
+	apiKey   string
+	httpc    *http.Client
 }
 
 // NewAnthropicProvider 基于共享配置构造 Anthropic 适配器。
 func NewAnthropicProvider(c *Client) *AnthropicProvider {
-	baseURL, apiKey, httpc := resolveClient(c, "https://api.anthropic.com")
-	return &AnthropicProvider{baseURL: baseURL, apiKey: apiKey, httpc: httpc}
+	baseURL, basePath, apiKey, httpc := resolveClient(c, "https://api.anthropic.com")
+	return &AnthropicProvider{baseURL: baseURL, basePath: basePath, apiKey: apiKey, httpc: httpc}
 }
 
 // Complete 实现 Provider 接口。
@@ -390,7 +391,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req *Request) (*Respon
 		"x-api-key":         p.apiKey,
 		"anthropic-version": "2023-06-01",
 	}
-	if err := doJSON(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, wire, &resp); err != nil {
+	if err := doJSON(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/messages"), headers, wire, &resp); err != nil {
 		return nil, err
 	}
 	return resp.ToInternal(), nil
@@ -402,7 +403,7 @@ func (p *AnthropicProvider) CompleteRaw(ctx context.Context, raw json.RawMessage
 		"x-api-key":         p.apiKey,
 		"anthropic-version": "2023-06-01",
 	}
-	return doRaw(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, raw)
+	return doRaw(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/messages"), headers, raw)
 }
 
 // Stream 发送流式请求(stream:true)并返回上游 SSE 响应体,调用方负责 Close。
@@ -415,7 +416,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (io.ReadCl
 		"x-api-key":         p.apiKey,
 		"anthropic-version": "2023-06-01",
 	}
-	resp, err := doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, wire)
+	resp, err := doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/messages"), headers, wire)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +435,7 @@ func (p *AnthropicProvider) StreamRaw(ctx context.Context, raw json.RawMessage) 
 		"x-api-key":         p.apiKey,
 		"anthropic-version": "2023-06-01",
 	}
-	return doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/messages", headers, json.RawMessage(raw))
+	return doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/messages"), headers, json.RawMessage(raw))
 }
 
 // Do 实现 Requester 接口:Anthropic 请求体可直接发起请求。

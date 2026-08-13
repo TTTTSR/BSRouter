@@ -10,8 +10,9 @@
 
 - **三种接口格式互通**：Anthropic Messages / OpenAI chat.completions / responses，请求响应格式由客户端决定，上游任意；**流式输出同样互通**（跨格式经规范化事件中转，格式匹配时直通透传）。
 - **直通 + 转换双路径**：模型支持客户端格式时请求原样转发（仅改写模型名，避免转换损失），否则经规范化中间层转换。
-- **聚合模型与故障转移**：自动聚合同名模型，按渠道优先级故障转移，失败成员冷却 10 分钟。
-- **内置 Web 界面**：黑白灰扁平管理 UI，管理供应商、模型分组、聚合、日志、API Key、Claude Code / Codex 预设。
+- **聚合模型与故障转移**：自动聚合同名模型，按渠道优先级故障转移，失败成员冷却 10 分钟；**聚合上下文窗口取全部成员的最小值**（未配置按默认 200k 参与、故障禁用的成员不参与），保证路由到任一成员都不超窗。
+- **故障提示与阻塞**：上游返回特定错误（如余额不足/限流）时记录故障并在「故障提示」页陈列、可逐条删除；该供应商的模型随之被**禁用**（聚合跳过、单独请求返回 503 阻塞原因）。**余额不足（默认 402）持久阻塞**直到手动删除故障；**限流（默认 429、启用、120 分钟）到期自动解除**（也可手动删除提前解除，适配 codingplan 等 5 小时限额提供商）；限流的**错误码 / 开关 / 时长**与余额不足错误码均可按供应商自定义（前端编辑表单）。故障在**成员级失败时即时记录**——即使聚合的兜底成员成功，报错的成员也会被立即记录并阻塞。
+- **内置 Web 界面**：黑白灰扁平管理 UI，管理供应商、模型分组、聚合、日志、故障、API Key、Claude Code / Codex / zcode 预设。
 - **单二进制分发**：前端经 `go:embed` 内嵌，编译后一个可执行文件即可运行。
 - **零外部依赖**：纯 Go 标准库实现。
 
@@ -91,8 +92,12 @@ go run ./cmd/gateway -api-key <key>
 | `-codex-auth <path>` | `~/.codex/auth.json` | 「应用本地」覆盖 Codex auth.json 的目标路径 |
 | `-codex-model-catalog <path>` | `~/.codex/bsrouter-models.json` | 「应用本地」覆盖 Codex 模型目录的目标路径 |
 | `-codex-models-cache <path>` | `~/.codex/models_cache.json` | 「应用本地」覆盖 Codex 模型缓存的目标路径 |
+| `-zcode <path>` | 配置目录 `zcode.json` | zcode 配置预设，传空串禁用 |
+| `-zcode-config <path>` | `~/.zcode/v2/config.json` | 「应用本地」覆盖 zcode config.json 的目标路径 |
 | `-stream-idle-timeout <duration>` | `0`（禁用） | 上游流式 idle 超时：两字节数据到达间隔超过该值即中止流（思考模型可能长时间无增量，启用建议 ≥120s） |
 | `-stream-retries <n>` | `2` | 流开始前失败（5xx/传输错误）每成员重试次数，`0` 关闭 |
+| `-faults <path>` | 配置目录 `faults.json` | 故障提示记录文件，传空串禁用 |
+| `-fault-mode <user\|dev>` | `user` | 故障捕捉模式：`user` 仅捕捉硬编码特定故障（当前仅余额不足），`dev` 捕捉所有错误（内部 + 上游）；前端不提供切换 |
 | `-version` | — | 打印版本并退出 |
 
 > 一键安装的 `bsr` 命令行同样支持透传以上参数，如 `bsr start -addr :9000 -api-key sk-...`。
@@ -108,7 +113,7 @@ go test ./... -race     # 竞态检测
 
 ### 配置文件位置
 
-全部配置（`providers.json` / `groups.json` / `keys.json` / `claude.json` / `codex.json` / `aggregates.json` / `network.json` / `logdetail.json`）与请求日志默认存 **OS 用户配置目录**（跨平台惯例，Go `os.UserConfigDir()`）：
+全部配置（`providers.json` / `groups.json` / `keys.json` / `claude.json` / `codex.json` / `zcode.json` / `aggregates.json` / `network.json` / `logdetail.json` / `faults.json`）与请求日志默认存 **OS 用户配置目录**（跨平台惯例，Go `os.UserConfigDir()`）：
 
 ```
 Windows: %APPDATA%\BSRouter\
@@ -116,7 +121,7 @@ macOS:   ~/Library/Application Support/BSRouter/
 Linux:   ~/.config/BSRouter/
 ```
 
-首次以默认路径启动时，会自动把运行目录下已有的同名配置（providers / groups / keys / claude / codex / aggregates）**迁移**到该目录（源文件保留，不覆盖已存在目标）。任一配置 flag 显式传路径即覆盖默认（相对当前运行目录解析，适合便携/分发）。请求日志默认以**启动时间戳命名**独立文件（`gateway-<时间戳>.log.jsonl`，每次运行一份），不做迁移。
+首次以默认路径启动时，会自动把运行目录下已有的同名配置（providers / groups / keys / claude / codex / zcode / aggregates）**迁移**到该目录（源文件保留，不覆盖已存在目标）。任一配置 flag 显式传路径即覆盖默认（相对当前运行目录解析，适合便携/分发）。请求日志默认以**启动时间戳命名**独立文件（`gateway-<时间戳>.log.jsonl`，每次运行一份），不做迁移。
 
 ### 配置
 
@@ -133,14 +138,18 @@ Linux:   ~/.config/BSRouter/
 - `kind`：供应商**默认**接口格式（`anthropic` / `completion` / `responses`）。
 - `models`：模型列表，每个模型可单独用 `kinds`（数组）声明一个或多个支持的接口格式（旧配置可用单值 `kind`，`kinds` 优先），**留空则用供应商默认**。同一供应商的不同模型可拥有不同格式。
 - `context_window`：该模型上下文窗口（**k 为单位**，如 `128` 表示 128k；留空/`0` 默认 200k）。Claude Code / Codex 预设据此生成模型名后缀与目录条目窗口。
-- `api_key` 以明文存储；`usage_url`/`models_url` 可选且必须 http(s)，`models_url` 默认 `{base}/v1/models`。
+- `base_path`（可选）：`base_url` 与端点之间的路径段，**留空回退 `/v1`**；`"/"` 表示根路径（端点直接拼到 `base_url` 后）。用于智谱 `/api/paas/v4`、百度千帆 `/v2`、火山方舟 `/api/v3`、Google Gemini `…/v1beta/openai` 等非 `/v1` 厂商。三种格式端点实际请求 `{base_url}{base_path}/chat/completions|messages|responses`，模型列表默认 `{base_url}{base_path}/models`。
+- `api_key` 以明文存储；`usage_url`/`models_url` 可选且必须 http(s)，`models_url` 默认 `{base}{base_path}/models`。
+- 故障阻塞覆盖（可选，前端编辑表单可配）：`rate_limit_status`（限流错误码，默认 429）、`rate_limit_enabled`（限流阻塞开关，默认启用）、`rate_limit_duration_minutes`（限流阻塞时长分钟，默认 120）、`insufficient_balance_status`（余额不足错误码，默认 402）。除 `rate_limit_enabled` 外：缺省 = 用默认；`0` = 禁用该分类阻塞；其余 400-599 = 该状态码触发对应阻塞（如 5 小时限额提供商 codingplan 用 429 触发限流阻塞并自定义时长）。
+
+> **内置模板库**：前端「供应商管理」页有「模板库」按钮，内置约 25 家主流大模型服务商（OpenAI、Anthropic、Gemini、xAI、Mistral、DeepSeek、Kimi、GLM、千问、文心、豆包、混元、MiniMax、硅基流动、阶跃、百川、OpenRouter、Groq、Together 等）的 base_url / 接口格式 / 模型列表 URL，**不携带硬编码模型列表**（避免模板模型过期或与实际账户权限不符）——补上 api_key 后在表单点「获取模型列表」从服务商 API 实时拉取，即可接入。数据经 `internal/providertemplates/templates.json` 内嵌，接口为 `GET /manage/v1/provider-templates`。**模板较多、无法逐一实测**：各服务商的接口细节（路径、鉴权头、模型列表格式等）可能有出入，接入某家遇到问题请反馈（提 issue 或联系维护者），我们会逐个修正模板。
 
 #### 模型路由
 
 请求体中的模型名：
 
 - `{供应商名}@{模型名}` 合成 id —— 网关按首个 `@` 切分路由到对应供应商，响应模型回填为请求时的完整模型名。
-- **聚合裸名**（无 `@`）—— 自动聚合同名模型，按成员**渠道优先级**流转做**故障转移**：成员出错时切换到其余成员，全部失败才返回错误；有成员成功时，失败成员在该聚合下**冷却禁用 10 分钟**（仅内存，重启清除）。**负载均衡为每聚合独立开关、默认关闭**——关闭时按优先级固定流转不轮询，开启时轮询打散请求。
+- **聚合裸名**（无 `@`）—— 自动聚合同名模型，按成员**渠道优先级**流转做**故障转移**：成员出错时切换到其余成员，全部失败才返回错误；有成员成功时，失败成员在该聚合下**冷却禁用 10 分钟**（仅内存，重启清除）。**负载均衡为每聚合独立开关、默认关闭**——关闭时按优先级固定流转不轮询，开启时轮询打散请求。聚合在模型列表的 `context_window` 取全部有效成员的最小值（未配置按默认 200k 参与、故障禁用的成员不参与），保证路由到任一成员都不超窗。
 - **直通**：模型支持请求的接口格式时，请求/响应**原样转发**（仅改写 model 字段），不经中间层转换；否则经规范化中间类型转换。
 
 #### 模型分组（`groups.json`）
@@ -175,6 +184,16 @@ Linux:   ~/.config/BSRouter/
 
 **native alias（Codex Desktop 显示自定义模型的关键）**：部分 Codex Desktop 版本在 app-server 加载模型目录后，再用远程 `available_models` allowlist 过滤选择器（上游 [openai/codex#19694](https://github.com/openai/codex/issues/19694)），只保留它认识的**裸原生 OpenAI id**，普通 `{供应商}@{模型}` 路由 id 会被全部剔除。网关为每个配置模型**自动分配**一条裸原生 slug（模型列表排序后依次占用原生 id 池：`gpt-5.6-sol / -terra / -luna / gpt-5.5 / gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex / gpt-5.2`，池用尽即停；slug 与模型对应关系无关紧要，只是通过 allowlist 的「护照」），目录条目 `display_name` 用真实模型 id（桌面显示诚实标签），`context_window` 同步模型配置（未配置默认 200k）。请求 `model=<原生slug>` 时网关在聚合/供应商解析**之前**解析到绑定模型，响应模型回填仍为请求时的 slug（直通/转换/流式/分组路径均生效；只捕获裸 slug，`{供应商}@{模型}` 等普通路由不受影响）。密钥未配置时自动注入系统默认 key。
 
+#### Z.ai zcode 配置预设（`zcode.json`）
+
+zcode（Z.ai 的 opencode 派生编码智能体，桌面 App + CLI）的模型列表**手动配置**在本地 `~/.zcode/v2/config.json`（不自动获取）。预设只配置**模型列表**（`models`，`{供应商}@{模型}` 合成 + 聚合裸名，留空回退网关全部可路由模型）与可选 `api_key`（留空自动注入系统默认 key）。「应用本地」（仅本机访问）把网关覆盖进 config.json 的 `provider` map（保留其余内置/自定义供应商），并**按模型原生接口格式自动分割为多个供应商**：
+
+- completion 模型 → `bsrouter-openai`（`openai-compatible`，`…/api/v1`，zcode 拼 `/chat/completions`）；
+- anthropic 模型 → `bsrouter-anthropic`（`anthropic`，`…/api` **不带 `/v1`**，zcode 拼 `/v1/messages`）；
+- responses 模型 → `bsrouter-responses`（`openai-compatible` + `wire_api=responses`，`…/api/v1`）。
+
+全部走网关统一 API 入口，让每种格式的模型都走**原生 wire 连接**（不经网关转换）、在 zcode 里便携切换多供应商；每条模型写 `limit.context`（按上下文窗口换算 tokens）。`-zcode-config` 可自定义覆盖目标路径；zcode 无命令端点，apply-local 即覆盖机制。
+
 ### 流式输出
 
 `stream:true` 全格式互通，两个路径：
@@ -197,10 +216,10 @@ Linux:   ~/.config/BSRouter/
 
 管理接口位于 `/manage/v1/*`（受网关 Key 鉴权）：
 
-- **供应商**：增删改查、连通性探测（ping）、同步模型（sync-models）、用量查询（usage）、`fetch-models` 从未注册供应商拉取模型供表单自动填充、`PUT /providers/{name}/models/{model}` 更新单个模型上下文窗口。
+- **供应商**：增删改查、连通性探测（ping）、同步模型（sync-models）、用量查询（usage）、`fetch-models` 从未注册供应商拉取模型供表单自动填充、`PUT /providers/{name}/models/{model}` 更新单个模型上下文窗口、`GET /provider-templates` 内置供应商模板库。
 - **模型分组 / 聚合**：分组虚拟供应商 CRUD；`GET/PUT /aggregates` 查看/设置聚合成员（成员顺序即渠道优先级）与每聚合负载均衡开关。
 - **受管 Key**：`/keys` 生成/列表/删除。
-- **Claude / Codex 预设**：CRUD + `/{name}/command` 一键启动命令（嵌入真实密钥）+ `/{name}/apply-local` 覆盖本地配置（**仅本机访问，否则 403**）；`GET /codex-native-slugs` 返回原生 slug 池。
+- **Claude / Codex / zcode 预设**：CRUD + Claude/Codex `/{name}/command` 一键启动命令（嵌入真实密钥）+ `/{name}/apply-local` 覆盖本地配置（**仅本机访问，否则 403**；zcode 无命令端点，apply-local 即覆盖机制）；`GET /codex-native-slugs` 返回原生 slug 池。
 - **日志**：`GET /logs` 最近日志（默认只含 `/api` 转发日志，`?scope=all` 含管理接口）、`GET /logs/file` 当前日志文件路径、`GET/PUT /logs/detail` 日志完整度开关。
 - **部署**：`GET/PUT /network` 部署形态与出口地址；`GET /local` 是否本机访问。
 
@@ -224,14 +243,16 @@ Linux:   ~/.config/BSRouter/
 
 ### 内置 Web 界面
 
-`http://127.0.0.1:18154/`，黑白灰扁平管理 UI（无阴影、无 emoji，图标用内联 SVG，控件仅少量圆角），登录后管理全部配置。六个页面：
+`http://127.0.0.1:18154/`，黑白灰扁平管理 UI（无阴影、无 emoji，图标用内联 SVG，控件仅少量圆角），登录后管理全部配置。八个页面：
 
 - **供应商管理**（`Providers.tsx`）：供应商增/改/删、连通性测试、同步模型、用量查询；表单含模型按行编辑（模型名 + 上下文窗口(k) + 支持的格式多选）与「获取模型列表」自动填充。
 - **模型管理**（`Models.tsx`）：已接入模型列表（行内编辑上下文窗口）、**聚合模型**（成员 tag 可拖拽调整渠道优先级、剔除/添加回成员、每聚合负载均衡开关）、模型分组 CRUD。
 - **日志查看**（`Logs.tsx`）：最近日志（点击行展开转发详情）、5 秒自动刷新、日志完整度下拉。
+- **故障提示**（`Faults.tsx`）：展示记录的故障（时间 / 类型 / 故障内容 / 模型 / 供应商 / 状态 / 自动解除时间，最新在前），页头显示当前捕捉模式，每条可删除；限流故障显示自动解除时间（2 小时后）。
 - **API Key**（`ApiKeys.tsx`）：生成/列表/删除受管 key（新生成 key 完整展示一次）。
 - **Claude 预设**（`ClaudePresets.tsx`）：预设 CRUD + 每行「复制 PS / 复制 Bash」一键启动命令 + 「应用本地」覆盖 `~/.claude/settings.json`（仅本机显示）。
 - **Codex 预设**（`CodexPresets.tsx`）：预设 CRUD + 模型列表（最多 8 个）+ 命令复制 + 「应用本地」覆盖 ~/.codex 四件套（仅本机显示）。
+- **zcode 预设**（`ZcodePresets.tsx`）：zcode 预设 CRUD（模型列表，留空回退网关全部）+ 「应用本地」覆盖 `~/.zcode/v2/config.json`（按模型原生格式分割为多供应商，仅本机显示）。
 
 远程（non-local）部署且未配置出口地址时，Claude / Codex 预设页顶部显示醒目横幅引导填写出口 IP 与映射端口。
 
@@ -249,12 +270,14 @@ Linux:   ~/.config/BSRouter/
 
 ```
 internal/gateway/   # 接入层:规范化中间类型 + 三种格式适配器(请求/响应/流式双向转换 + 直通)
-internal/provider/  # 供应商:Config(含模型级多接口格式 kinds + context_window)、按模型 Kind 派发、Manager(JSON 持久化)
+internal/provider/  # 供应商:Config(含模型级多接口格式 kinds + context_window + base_path)、按模型 Kind 派发、Manager(JSON 持久化)
+internal/providertemplates/ # 内置供应商模板库(go:embed templates.json,不含硬编码模型,前端「模板库」一键接入)
 internal/group/     # 模型分组:虚拟供应商 + Manager(URL 冲突校验)
-internal/aggregate/ # 聚合模型:成员从供应商派生 + 剔除名单/渠道优先级/负载均衡开关持久化 + 故障转移冷却(仅内存)
+internal/aggregate/ # 聚合模型:成员从供应商派生 + 剔除名单/渠道优先级/负载均衡开关持久化 + 故障转移冷却(仅内存)+ 上下文窗口取成员最小值
 internal/apikey/    # 受管 API Key:生成/查询/删除 + JSON 持久化
 internal/claude/    # Claude Code 配置预设:Config(镜像 env 块)+ Manager + 命令生成(PS/bash)+ 覆盖本地 settings.json
 internal/codex/     # OpenAI Codex 配置预设:Config + Manager + -c 命令生成 + TOML 合并(apply-local)+ native alias 模型目录
+internal/zcode/     # Z.ai zcode 配置预设:Config(模型列表 + api_key)+ Manager + 覆盖本地 config.json(按模型原生格式分割多供应商)
 internal/network/   # 部署形态检测(仅网卡,零外部请求)+ 出口地址(出口IP+映射端口)JSON 持久化
 internal/server/    # 网关 HTTP 服务:转发 + 管理 + 探测 + 分组 + 聚合 + 日志 + 受管 key + 预设 + 部署 + SPA 挂载
 internal/logger/    # JSONL 请求日志(写 + 最近 N 条读取 + 完整度分级 + 密钥抹除/截断)
@@ -321,8 +344,9 @@ BSRouter is a Large Language Model (LLM) Gateway that provides a unified access 
 
 - **Three wire formats interoperate**: Anthropic Messages / OpenAI chat.completions / responses. The request/response format is decided by the client; the upstream can be anything. **Streaming interoperates too** — cross-format via canonical events, same-format via direct passthrough.
 - **Passthrough + conversion dual path**: when a model natively supports the client's format, the request is forwarded verbatim (only the model field is rewritten, avoiding conversion loss); otherwise it goes through the canonical conversion layer.
-- **Aggregate models & failover**: same-named models from different providers auto-aggregate into bare-name aggregates, fail over by channel priority, and failed members get a 10-minute cooldown.
-- **Built-in web UI**: black-white-gray flat management UI for providers, model groups, aggregates, logs, API keys, and Claude Code / Codex presets.
+- **Aggregate models & failover**: same-named models from different providers auto-aggregate into bare-name aggregates, fail over by channel priority, and failed members get a 10-minute cooldown. **The aggregate's context window is the minimum across its members** (unset members count as the default 200k; fault-blocked members are excluded), so routing to any member never overflows the window.
+- **Fault alerts & blocking**: when the upstream returns a specific error (e.g. insufficient balance / rate limit), the gateway records a fault shown on the "Faults" page (each row deletable), and that provider's models become **blocked** (aggregates skip it, standalone requests return 503 with the blocking reason). **Insufficient balance (default 402) blocks persistently** until the fault is manually deleted; **rate limit (default 429, enabled, 120 min) auto-unblocks when the duration elapses** (also manually deletable — fits 5-hour-limit providers like codingplan); the rate-limit **status code / enabled switch / duration** and the insufficient-balance status code are all per-provider configurable in the edit form. Faults are recorded **per member at failure time** — even if a fallback member later succeeds, the failing provider is recorded and blocked immediately.
+- **Built-in web UI**: black-white-gray flat management UI for providers, model groups, aggregates, logs, faults, API keys, and Claude Code / Codex / zcode presets.
 - **Single-binary distribution**: the frontend is embedded via `go:embed`; one compiled executable runs everything.
 - **Zero external dependencies**: pure Go standard library.
 
@@ -405,8 +429,12 @@ Complete set of flags for `go run ./cmd/gateway` (or the compiled binary):
 | `-codex-auth <path>` | `~/.codex/auth.json` | Target path for "apply-local" to override Codex auth.json |
 | `-codex-model-catalog <path>` | `~/.codex/bsrouter-models.json` | Target path for "apply-local" to override the Codex model catalog |
 | `-codex-models-cache <path>` | `~/.codex/models_cache.json` | Target path for "apply-local" to override the Codex models cache |
+| `-zcode <path>` | `zcode.json` in config dir | zcode preset config; empty string disables |
+| `-zcode-config <path>` | `~/.zcode/v2/config.json` | Target path for "apply-local" to override the local zcode config.json |
 | `-stream-idle-timeout <duration>` | `0` (disabled) | Upstream stream idle timeout: aborts the stream when no data arrives for this long (thinking models may emit nothing for a while; ≥120s recommended when enabled) |
 | `-stream-retries <n>` | `2` | Retries per member for pre-stream failures (5xx / transport errors); `0` disables |
+| `-faults <path>` | `faults.json` in config dir | Fault-record file; empty string disables |
+| `-fault-mode <user\|dev>` | `user` | Fault capture mode: `user` records only hardcoded faults (currently just insufficient balance), `dev` records all errors (internal + upstream); not toggleable from the UI |
 | `-version` | — | Print version and exit |
 
 > The `bsr` CLI from the one-click install forwards these flags too, e.g. `bsr start -addr :9000 -api-key sk-...`.
@@ -422,7 +450,7 @@ go test ./... -race     # race detector
 
 ### Config File Locations
 
-All config files (`providers.json` / `groups.json` / `keys.json` / `claude.json` / `codex.json` / `aggregates.json` / `network.json` / `logdetail.json`) and the request log default to the **OS user config directory** (platform convention, via Go's `os.UserConfigDir()`):
+All config files (`providers.json` / `groups.json` / `keys.json` / `claude.json` / `codex.json` / `zcode.json` / `aggregates.json` / `network.json` / `logdetail.json`) and the request log default to the **OS user config directory** (platform convention, via Go's `os.UserConfigDir()`):
 
 ```
 Windows: %APPDATA%\BSRouter\
@@ -430,7 +458,7 @@ macOS:   ~/Library/Application Support/BSRouter/
 Linux:   ~/.config/BSRouter/
 ```
 
-On first startup with the default paths, existing same-named config files in the run directory (providers / groups / keys / claude / codex / aggregates) are **migrated** into that directory (the source file is kept, and an existing target is never overwritten). Passing any config flag explicitly overrides the default (resolved relative to the current working directory — good for portable/distributed setups). The request log defaults to an independent file named by **startup timestamp** (`gateway-<timestamp>.log.jsonl`, one per run) and is not migrated.
+On first startup with the default paths, existing same-named config files in the run directory (providers / groups / keys / claude / codex / zcode / aggregates) are **migrated** into that directory (the source file is kept, and an existing target is never overwritten). Passing any config flag explicitly overrides the default (resolved relative to the current working directory — good for portable/distributed setups). The request log defaults to an independent file named by **startup timestamp** (`gateway-<timestamp>.log.jsonl`, one per run) and is not migrated.
 
 ### Configuration
 
@@ -448,13 +476,16 @@ On first startup with the default paths, existing same-named config files in the
 - `models`: the model list. Each model can declare one or more supported formats with a `kinds` array (legacy configs may use a single `kind`; `kinds` wins), and **an empty list falls back to the provider default**. Different models of the same provider can have different formats.
 - `context_window`: the model's context window (**in units of k**, e.g. `128` means 128k; empty/`0` defaults to 200k). Claude Code / Codex presets use this to derive model-name suffixes and catalog entry windows.
 - `api_key` is stored in plaintext; `usage_url` / `models_url` are optional and must be http(s); `models_url` defaults to `{base}/v1/models`.
+- Fault-blocking overrides (optional, editable in the provider form): `rate_limit_status` (rate-limit code, default 429), `rate_limit_enabled` (rate-limit block switch, default on), `rate_limit_duration_minutes` (rate-limit block duration in minutes, default 120), `insufficient_balance_status` (insufficient-balance code, default 402). Except `rate_limit_enabled`: absent = default; `0` = disable that block category; any other 400-599 = that status triggers the corresponding block (e.g. 5-hour-limit providers like codingplan use 429 for rate-limit blocking and can set a custom duration).
+
+> **Built-in template library**: the "Providers" page has a "Template Library" button with ~25 mainstream providers (OpenAI, Anthropic, Gemini, xAI, Mistral, DeepSeek, Kimi, GLM, Qwen, Ernie, Doubao, Hunyuan, MiniMax, SiliconFlow, StepFun, Baichuan, OpenRouter, Groq, Together, etc.), pre-filling base_url / wire format / models URL. Templates carry **no hardcoded model list** (so they never go stale or mismatch your account's access) — fill in the API key, then click "Fetch models" in the form to pull the list live from the provider's API. Data is embedded via `internal/providertemplates/templates.json`; endpoint `GET /manage/v1/provider-templates`. **With so many templates, not every one can be fully tested**: per-provider interface details (paths, auth headers, model-list format, etc.) may differ — if connecting a certain provider fails, please report it (open an issue or contact the maintainers) and we will fix that template.
 
 #### Model Routing
 
 The model name in a request body:
 
 - **Composite id** `{provider}@{model}` — the gateway splits on the first `@` and routes to the corresponding provider; the response model is backfilled to the full name from the request.
-- **Bare aggregate name** (no `@`) — same-named models auto-aggregate and flow by member **channel priority** with **failover**: when a member errors, the gateway switches to the next; the error is returned only if all members fail. When another member succeeds, the failed member is **cooldown-banned for 10 minutes** within that aggregate (memory-only, cleared on restart). **Load balancing is a per-aggregate switch, off by default** — when off, the fixed priority order is used without rotation; when on, requests are spread by round-robin.
+- **Bare aggregate name** (no `@`) — same-named models auto-aggregate and flow by member **channel priority** with **failover**: when a member errors, the gateway switches to the next; the error is returned only if all members fail. When another member succeeds, the failed member is **cooldown-banned for 10 minutes** within that aggregate (memory-only, cleared on restart). **Load balancing is a per-aggregate switch, off by default** — when off, the fixed priority order is used without rotation; when on, requests are spread by round-robin. The aggregate's `context_window` in the model list is the minimum across its effective members (unset members count as the default 200k; fault-blocked members are excluded), so routing to any member never overflows the window.
 - **Passthrough**: when a model supports the request's wire format, the request/response is forwarded **verbatim** (only the `model` field is rewritten), bypassing the conversion layer; otherwise it is converted through the canonical intermediate types.
 
 #### Model Groups (`groups.json`)
@@ -489,6 +520,16 @@ Presets bind to a virtual provider (the unified API or a group; `codex` only sup
 
 **Native alias (the key to showing custom models in Codex Desktop)**: some Codex Desktop versions filter the model picker against a remote `available_models` allowlist after the app-server loads the model catalog ([openai/codex#19694](https://github.com/openai/codex/issues/19694)), keeping only the **bare native OpenAI ids** it recognizes and dropping ordinary `{provider}@{model}` routing ids. The gateway **auto-assigns** each configured model a bare native slug (the sorted model list occupies the native id pool in order: `gpt-5.6-sol / -terra / -luna / gpt-5.5 / gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex / gpt-5.2`, stopping when the pool is exhausted; the slug↔model correspondence is irrelevant — it is just a "passport" through the allowlist). Catalog entries use the real model id as `display_name` (honest labels on Desktop) and sync `context_window` from the model config (default 200k when unset). When a request sends `model=<native slug>`, the gateway resolves it to the bound model **before** aggregate/provider resolution, and the response model is backfilled with the requested slug (works across passthrough / conversion / streaming / group paths; only bare slugs are captured — ordinary routes like `{provider}@{model}` are unaffected). Keys are auto-injected with the system default when a preset has none.
 
+#### Z.ai zcode Presets (`zcode.json`)
+
+zcode (Z.ai's opencode-derived coding agent, desktop app + CLI) keeps its model list **manually configured** in the local `~/.zcode/v2/config.json` (not auto-fetched). A preset configures only a **model list** (`models`: `{provider}@{model}` composites + bare aggregate names; empty falls back to all routable gateway models) and an optional `api_key` (empty auto-injects the system default key). "Apply to local" (local access only) overlays the gateway into the config.json `provider` map (preserving other built-in/custom providers) and **auto-splits the models by native wire format into multiple providers**:
+
+- completion models → `bsrouter-openai` (`openai-compatible`, `…/api/v1`, zcode appends `/chat/completions`);
+- anthropic models → `bsrouter-anthropic` (`anthropic`, `…/api` **without `/v1`**, zcode appends `/v1/messages`);
+- responses models → `bsrouter-responses` (`openai-compatible` + `wire_api=responses`, `…/api/v1`).
+
+All requests go through the gateway's unified API, so every format connects over its **native wire** (no gateway conversion) and you can switch between the multiple providers in zcode's UI; each model entry carries `limit.context` (derived from its context window in tokens). `-zcode-config` customizes the override target; zcode has no command endpoint — apply-local is the override mechanism.
+
 ### Streaming
 
 `stream:true` interoperates across all formats via two paths:
@@ -514,7 +555,7 @@ The management API lives under `/manage/v1/*` (gated by the gateway key):
 - **Providers**: CRUD, connectivity probe (ping), sync-models, usage query (usage), `fetch-models` to pull models from an unregistered provider for form autofill, and `PUT /providers/{name}/models/{model}` to update a single model's context window.
 - **Groups / aggregates**: group virtual-provider CRUD; `GET/PUT /aggregates` to view/set aggregate members (member order is channel priority) and the per-aggregate load-balancing switch.
 - **Managed keys**: `/keys` create / list / delete.
-- **Claude / Codex presets**: CRUD + `/{name}/command` one-click launch command (embeds the real key) + `/{name}/apply-local` to overwrite local config (**local access only, 403 otherwise**); `GET /codex-native-slugs` returns the native slug pool.
+- **Claude / Codex / zcode presets**: CRUD + Claude/Codex `/{name}/command` one-click launch command (embeds the real key) + `/{name}/apply-local` to overwrite local config (**local access only, 403 otherwise**; zcode has no command endpoint — apply-local is the override mechanism); `GET /codex-native-slugs` returns the native slug pool.
 - **Logs**: `GET /logs` recent entries (defaults to `/api` forwarding logs only; `?scope=all` includes management endpoints), `GET /logs/file` the current log file path, `GET/PUT /logs/detail` the log-detail-level switch.
 - **Deployment**: `GET/PUT /network` deployment mode and egress address; `GET /local` whether the request is from the local machine.
 
@@ -538,14 +579,16 @@ Egress-address priority: **`-public-addr <full URL>`** (e.g. `https://gw.example
 
 ### Built-in Web UI
 
-`http://127.0.0.1:18154/` — a black-white-gray flat management UI (no shadows, no emoji, inline SVG icons, slight corner radius on controls). After login you can manage everything. Six pages:
+`http://127.0.0.1:18154/` — a black-white-gray flat management UI (no shadows, no emoji, inline SVG icons, slight corner radius on controls). After login you can manage everything. Eight pages:
 
 - **Providers** (`Providers.tsx`): provider add/edit/delete, connectivity test, sync-models, usage query; the form edits models row-by-row (model name + context window(k) + supported formats) and offers "fetch models" autofill.
 - **Models** (`Models.tsx`): the connected-model list (inline context-window editing), **aggregate models** (drag-and-drop member tags for channel priority, remove/re-add members, per-aggregate load-balancing switch), and group CRUD.
 - **Logs** (`Logs.tsx`): recent logs (click a row to expand forward details), 5-second auto-refresh, log-detail-level dropdown.
+- **Faults** (`Faults.tsx`): recorded faults (time / category / message / model / provider / status / auto-unblock time, newest first), current capture mode in the header, each row deletable; rate-limit faults show their 2-hour auto-unblock time.
 - **API Keys** (`ApiKeys.tsx`): create/list/delete managed keys (a newly generated key is shown in full exactly once).
 - **Claude Presets** (`ClaudePresets.tsx`): preset CRUD + per-row "Copy PS / Copy Bash" one-click launch commands + "Apply to local" to overwrite `~/.claude/settings.json` (shown only when local).
 - **Codex Presets** (`CodexPresets.tsx`): preset CRUD + model list (max 8) + command copy + "Apply to local" to overwrite the ~/.codex four-file set (shown only when local).
+- **zcode Presets** (`ZcodePresets.tsx`): zcode preset CRUD (model list; empty falls back to all gateway models) + "Apply to local" to overwrite `~/.zcode/v2/config.json` (auto-splits into multiple providers by native format; shown only when local).
 
 On remote (non-local) deployments without an egress address, the Claude / Codex preset pages show a prominent banner at the top guiding the egress IP and mapped port.
 
@@ -564,11 +607,13 @@ On remote (non-local) deployments without an egress address, the Claude / Codex 
 ```
 internal/gateway/   # Adapter layer: canonical intermediate types + three format adapters (bidirectional request/response/stream conversion + passthrough)
 internal/provider/  # Providers: Config (per-model multi-format kinds + context_window), dispatch by model Kind, Manager (JSON persistence)
+internal/providertemplates/ # Built-in provider template library (go:embed templates.json, no hardcoded models, one-click connect via the UI template picker)
 internal/group/     # Model groups: virtual provider + Manager (URL collision validation)
-internal/aggregate/ # Aggregate models: members derived from providers + exclusion list/channel priority/load-balance switch persistence + failover cooldown (memory-only)
+internal/aggregate/ # Aggregate models: members derived from providers + exclusion list/channel priority/load-balance switch persistence + failover cooldown (memory-only) + context window = min over members
 internal/apikey/    # Managed API keys: generate/query/delete + JSON persistence
 internal/claude/    # Claude Code presets: Config (mirrors env block) + Manager + command generation (PS/bash) + apply-local settings.json
 internal/codex/     # OpenAI Codex presets: Config + Manager + -c command generation + TOML merge (apply-local) + native-alias model catalog
+internal/zcode/     # Z.ai zcode presets: Config (model list + api_key) + Manager + override local config.json (split into multiple providers by native format)
 internal/network/   # Deployment-mode detection (NIC only, zero external requests) + egress address (IP + mapped port) JSON persistence
 internal/server/    # Gateway HTTP service: forwarding + management + probes + groups + aggregates + logs + managed keys + presets + deployment + SPA mount
 internal/logger/    # JSONL request logs (write + recent-N read + detail levels + key redaction/truncation)

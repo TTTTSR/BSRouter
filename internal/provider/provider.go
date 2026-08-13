@@ -80,10 +80,17 @@ type Config struct {
 	Kind      Kind          `json:"kind"`
 	Name      string        `json:"name"`
 	BaseURL   string        `json:"base_url"`
+	BasePath  string        `json:"base_path,omitempty"`  // base_url 与端点之间的路径段,留空回退 "/v1"
 	APIKey    string        `json:"api_key"`
 	Models    []ModelConfig `json:"models,omitempty"`
 	UsageURL  string        `json:"usage_url,omitempty"`  // 用量查询接口 URL(可选)
-	ModelsURL string        `json:"models_url,omitempty"` // 模型列表接口 URL(可选,默认 {base}/v1/models)
+	ModelsURL string        `json:"models_url,omitempty"` // 模型列表接口 URL(可选,默认 {base}{base_path}/models)
+	// 故障阻塞的上游错误码覆盖(nil = 用默认:余额不足 402、限流 429;0 = 禁用该分类阻塞;
+	// 其余 4xx/5xx = 该状态码)。用于适配返回码非标准的供应商(如 5 小时限额的 codingplan 用 429)。
+	RateLimitStatus           *int  `json:"rate_limit_status,omitempty"`           // 限流错误码(默认 429)
+	RateLimitEnabled          *bool `json:"rate_limit_enabled,omitempty"`          // 限流阻塞开关(默认启用;false 禁用)
+	RateLimitDurationMinutes  int   `json:"rate_limit_duration_minutes,omitempty"` // 限流阻塞时长(分钟;0 默认 120)
+	InsufficientBalanceStatus *int  `json:"insufficient_balance_status,omitempty"` // 余额不足错误码(默认 402)
 }
 
 // Validate 校验配置字段。
@@ -103,6 +110,10 @@ func (c Config) Validate() error {
 	}
 	if !validKind(c.Kind) {
 		return fmt.Errorf("provider %q: unknown kind %q", c.Name, c.Kind)
+	}
+	// base_path 是 base_url 与端点之间的路径段(留空回退 /v1),须以 "/" 开头。
+	if c.BasePath != "" && !strings.HasPrefix(c.BasePath, "/") {
+		return fmt.Errorf("provider %q: base_path must start with '/'", c.Name)
 	}
 	seen := make(map[string]bool, len(c.Models))
 	for _, m := range c.Models {
@@ -137,6 +148,16 @@ func (c Config) Validate() error {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return fmt.Errorf("provider %q: %s must be a valid http(s) URL", c.Name, name)
 		}
+	}
+	// 阻塞错误码覆盖:0 = 禁用,其余必须是 4xx/5xx(HTTP 错误码)。
+	for name, v := range map[string]*int{"rate_limit_status": c.RateLimitStatus, "insufficient_balance_status": c.InsufficientBalanceStatus} {
+		if v != nil && *v != 0 && (*v < 400 || *v > 599) {
+			return fmt.Errorf("provider %q: %s must be 0 (disabled) or an HTTP error code (400-599)", c.Name, name)
+		}
+	}
+	// 限流阻塞时长(分钟):0 = 默认 120,不允许负数。
+	if c.RateLimitDurationMinutes < 0 {
+		return fmt.Errorf("provider %q: rate_limit_duration_minutes must be >= 0 (0 uses default 120)", c.Name)
 	}
 	return nil
 }
@@ -272,12 +293,13 @@ func (b *BaseProvider) adapterFor(model string) (gateway.Provider, error) {
 	}
 }
 
-// modelsURL 返回模型列表接口地址:优先使用配置的 ModelsURL,否则按接口格式默认。
+// modelsURL 返回模型列表接口地址:优先使用配置的 ModelsURL,否则按 base_path 拼接
+// 默认 {base}{base_path}/models(默认 base_path 为 /v1)。
 func (b *BaseProvider) modelsURL() string {
 	if b.cfg.ModelsURL != "" {
 		return b.cfg.ModelsURL
 	}
-	return strings.TrimRight(b.cfg.BaseURL, "/") + "/v1/models"
+	return gateway.JoinPath(b.cfg.BaseURL, b.cfg.BasePath, "/models")
 }
 
 // applyAuth 按接口格式为请求设置鉴权头。
@@ -420,7 +442,7 @@ func New(cfg Config) (Provider, error) {
 		return nil, err
 	}
 	base := &BaseProvider{cfg: cfg, httpc: &http.Client{Timeout: 120 * time.Second}}
-	client := &gateway.Client{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, HTTP: base.httpc}
+	client := &gateway.Client{BaseURL: cfg.BaseURL, BasePath: cfg.BasePath, APIKey: cfg.APIKey, HTTP: base.httpc}
 	base.anthropic = gateway.NewAnthropicProvider(client)
 	base.completion = gateway.NewCompletionProvider(client)
 	base.responses = gateway.NewResponsesProvider(client)

@@ -30,11 +30,14 @@ import (
 	"BSRouter/internal/apikey"
 	"BSRouter/internal/claude"
 	"BSRouter/internal/codex"
+	"BSRouter/internal/fault"
 	"BSRouter/internal/gateway"
 	"BSRouter/internal/group"
 	"BSRouter/internal/logger"
 	"BSRouter/internal/network"
 	"BSRouter/internal/provider"
+	"BSRouter/internal/providertemplates"
+	"BSRouter/internal/zcode"
 )
 
 // maxBodyBytes 限制入站请求体大小,防止未鉴权的内存耗尽。
@@ -47,7 +50,9 @@ type Server struct {
 	keys       *apikey.Manager
 	presets    *claude.Manager
 	codex      *codex.Manager
+	zcode      *zcode.Manager
 	aggregates *aggregate.Manager
+	faults     *fault.Manager
 	apiKey     string
 	log        *logger.Logger
 	webUI      http.Handler
@@ -71,6 +76,9 @@ type Server struct {
 	// codexModelsCachePath 覆盖本地 Codex 模型缓存文件的目标路径;
 	// 留空时用 ~/.codex/models_cache.json(桌面 app 的模型列表来源)。
 	codexModelsCachePath string
+	// zcodeConfigPath 覆盖本地 zcode 配置的目标 config.json 路径;
+	// 留空时用 ~/.zcode/v2/config.json(仅测试/自定义使用)。
+	zcodeConfigPath string
 	// deployment 部署形态(由 cmd/gateway 启动时判定);netm 是出口地址配置。
 	deployment *Deployment
 	netm       *network.Manager
@@ -161,10 +169,24 @@ func (s *Server) WithCodexPresets(cm *codex.Manager) *Server {
 	return s
 }
 
+// WithZcodePresets 启用 Z.ai zcode 配置预设管理(/manage/v1/zcode-presets)。
+// 需在 Handler() 之前调用。
+func (s *Server) WithZcodePresets(cm *zcode.Manager) *Server {
+	s.zcode = cm
+	return s
+}
+
 // WithAggregates 启用聚合模型(自动聚合同名模型,裸名调用时轮询负载均衡)。
 // 需在 Handler() 之前调用。
 func (s *Server) WithAggregates(am *aggregate.Manager) *Server {
 	s.aggregates = am
+	return s
+}
+
+// WithFaults 启用故障提示模块:记录上游特定错误(用户模式)或所有错误(开发模式),
+// 经 /manage/v1/faults 陈列展示并逐条删除。需在 Handler() 之前调用。
+func (s *Server) WithFaults(fm *fault.Manager) *Server {
+	s.faults = fm
 	return s
 }
 
@@ -200,6 +222,13 @@ func (s *Server) WithCodexModelCatalogPath(path string) *Server {
 // 留空时默认 ~/.codex/models_cache.json(桌面 app 读此文件)。仅测试与自定义场景使用。
 func (s *Server) WithCodexModelsCachePath(path string) *Server {
 	s.codexModelsCachePath = path
+	return s
+}
+
+// WithZcodeConfigPath 指定"覆盖本地 zcode 配置"的目标 config.json 路径。
+// 留空时默认 ~/.zcode/v2/config.json。仅测试与自定义场景使用。
+func (s *Server) WithZcodeConfigPath(path string) *Server {
+	s.zcodeConfigPath = path
 	return s
 }
 
@@ -271,6 +300,8 @@ func (s *Server) Handler() http.Handler {
 	}
 	// 模型列表拉取(供前端表单自动填充,供应商尚未注册)
 	mux.HandleFunc("POST /manage/v1/fetch-models", s.handleFetchModels)
+	// 内置供应商接入模板(用户只需填入 api_key)
+	mux.HandleFunc("GET /manage/v1/provider-templates", s.handleListProviderTemplates)
 	// 受管 API Key 端点
 	if s.keys != nil {
 		mux.HandleFunc("POST /manage/v1/keys", s.handleAddKey)
@@ -298,10 +329,24 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /manage/v1/codex-presets/{name}/apply-local", s.handleApplyCodexPresetLocal)
 		mux.HandleFunc("GET /manage/v1/codex-native-slugs", s.handleListCodexNativeSlugs)
 	}
+	// Z.ai zcode 配置预设端点
+	if s.zcode != nil {
+		mux.HandleFunc("POST /manage/v1/zcode-presets", s.handleAddZcodePreset)
+		mux.HandleFunc("GET /manage/v1/zcode-presets", s.handleListZcodePresets)
+		mux.HandleFunc("GET /manage/v1/zcode-presets/{name}", s.handleGetZcodePreset)
+		mux.HandleFunc("PUT /manage/v1/zcode-presets/{name}", s.handleUpdateZcodePreset)
+		mux.HandleFunc("DELETE /manage/v1/zcode-presets/{name}", s.handleDeleteZcodePreset)
+		mux.HandleFunc("POST /manage/v1/zcode-presets/{name}/apply-local", s.handleApplyZcodePresetLocal)
+	}
 	// 聚合模型端点
 	if s.aggregates != nil {
 		mux.HandleFunc("GET /manage/v1/aggregates", s.handleListAggregates)
 		mux.HandleFunc("PUT /manage/v1/aggregates/{name}", s.handleUpdateAggregate)
+	}
+	// 故障提示端点(记录上游特定错误/内部错误,供前端陈列展示并逐条删除)
+	if s.faults != nil {
+		mux.HandleFunc("GET /manage/v1/faults", s.handleListFaults)
+		mux.HandleFunc("DELETE /manage/v1/faults/{id}", s.handleDeleteFault)
 	}
 	// 内嵌前端页面(静态资源)
 	if s.webUI != nil {
@@ -313,8 +358,8 @@ func (s *Server) Handler() http.Handler {
 		// 也避免逐请求读字段带来的数据竞争。
 		h = s.requireAPIKey(s.apiKey, h)
 	}
-	if s.log != nil {
-		// 日志在最外层:被鉴权拒绝的请求也要记录。
+	if s.log != nil || s.faults != nil {
+		// 日志/故障记录在最外层:被鉴权拒绝的请求也要记录。
 		h = s.logMiddleware(h)
 	}
 	return h
@@ -413,10 +458,13 @@ const logCtxKey ctxKey = iota
 type logRecord struct {
 	requestID             string
 	model                 string
-	provider              string
+	provider              string // 日志展示用(分组请求带 "组名→" 前缀)
+	providerName          string // 真实供应商名(不含分组前缀,供故障阻塞匹配)
 	kind                  string
 	error                 string
 	upstreamStatus        int
+	blocked               bool   // 该请求被故障阻塞(供故障模块跳过重复记录)
+	faultRecorded         bool   // 转发失败已在成员级即时记录(供故障模块跳过最终重复记录)
 	requestBody           string // 客户端原始请求体(仅转换路径)
 	forwardURL            string
 	forwardRequest        string // 发给上游(转换后的请求体)
@@ -458,6 +506,119 @@ func recordStreamError(rec *logRecord, ctx context.Context, err error) {
 	if ctx.Err() == nil || gateway.IsUpstreamStreamError(err) {
 		rec.error = captureBody(err.Error(), "")
 	}
+}
+
+// markBlocked 若 err 是阻塞错误,在日志记录上记入错误信息(供日志排查)并打上 blocked
+// 标记,使故障模块不把它重复记为一条新故障(该故障已在故障列表中,正是它触发了阻塞)。
+func markBlocked(ctx context.Context, err error) {
+	var be *fault.BlockedError
+	if !errors.As(err, &be) {
+		return
+	}
+	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
+		rec.error = captureBody(err.Error(), "")
+		rec.blocked = true
+	}
+}
+
+// recordMemberFault 在转发某个成员失败时即时记录故障(供故障转移中途触发阻塞——即使
+// 后续成员成功,该失败成员也已被记录)。fault.Record 按模式与分类过滤(用户模式仅记
+// 余额不足等可阻塞故障,开发模式记全部)。err 应已抹除密钥。
+func (s *Server) recordMemberFault(rec *logRecord, upstreamStatus int, providerName, model string, err error) {
+	if s.faults == nil || rec == nil || err == nil {
+		return
+	}
+	rec.faultRecorded = true
+	rl, ins, rlEnabled, rlDur := s.providerBlockInput(providerName)
+	s.faults.Record(fault.Input{
+		Error:                    captureBody(err.Error(), ""),
+		Status:                   http.StatusBadGateway,
+		UpstreamStatus:           upstreamStatus,
+		Upstream:                 upstreamStatus != 0 || providerName != "",
+		Model:                    model,
+		Provider:                 providerName,
+		RateLimitStatus:          rl,
+		RateLimitEnabled:         rlEnabled,
+		RateLimitDurationMinutes: rlDur,
+		InsufficientBalanceStatus: ins,
+	})
+}
+
+// providerBlockInput 返回供应商自定义的阻塞配置:限流/余额不足错误码(nil = 用默认)、
+// 限流阻塞开关(nil = 启用)、限流阻塞时长(分钟,0 = 默认 120)。供应商不存在时全 nil/0。
+func (s *Server) providerBlockInput(name string) (rateLimit, insufficient *int, rateLimitEnabled *bool, rateLimitDurationMinutes int) {
+	if s.mgr != nil {
+		if p, err := s.mgr.Get(name); err == nil {
+			cfg := p.Config()
+			return cfg.RateLimitStatus, cfg.InsufficientBalanceStatus, cfg.RateLimitEnabled, cfg.RateLimitDurationMinutes
+		}
+	}
+	return nil, nil, nil, 0
+}
+
+// recordFault 把一次出错请求记录为故障(供故障提示模块)。判定规则:
+//   - 转发失败已在成员级即时记录(rec.faultRecorded)或阻塞错误(rec.blocked)时跳过;
+//   - 有错误信息(rec.error,如流式中途失败)或网关返回非鉴权类 4xx/5xx 时视为故障;
+//   - 鉴权失败(401/403)不属于网关/上游故障,不记录;
+//   - 无错误信息时按状态码合成故障内容。
+// 具体分类与模式过滤由 fault.Manager 决定(用户模式仅记硬编码特定故障,开发模式记全部)。
+func (s *Server) recordFault(rec *logRecord, status int) {
+	if rec == nil {
+		return
+	}
+	// 阻塞错误(供应商被故障禁用)不重复记录:对应故障已在故障列表中,正是它触发了阻塞。
+	if rec.blocked {
+		return
+	}
+	// 转发失败已在成员级即时记录(complete/streamComplete/直通闭包),此处不再重复记录。
+	if rec.faultRecorded {
+		return
+	}
+	if rec.error == "" && (status < 400 || status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		return
+	}
+	msg := rec.error
+	if msg == "" {
+		msg = fmt.Sprintf("gateway returned %d %s", status, http.StatusText(status))
+	}
+	providerName := rec.providerName
+	if providerName == "" {
+		providerName = rec.provider // 无真实供应商名时回退(分组前缀形态)
+	}
+	rl, ins, rlEnabled, rlDur := s.providerBlockInput(providerName)
+	s.faults.Record(fault.Input{
+		Error:                    msg,
+		Status:                   status,
+		UpstreamStatus:           rec.upstreamStatus,
+		Upstream:                 rec.upstreamStatus != 0 || rec.provider != "",
+		Model:                    rec.model,
+		Provider:                 providerName,
+		RateLimitStatus:          rl,
+		RateLimitEnabled:         rlEnabled,
+		RateLimitDurationMinutes: rlDur,
+		InsufficientBalanceStatus: ins,
+	})
+}
+
+// handleListFaults 返回当前故障捕捉模式与全部故障(最新在前)。
+func (s *Server) handleListFaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":   s.faults.Mode(),
+		"faults": s.faults.List(),
+	})
+}
+
+// handleDeleteFault 删除一条故障;不存在返回 404,持久化失败返回 500。
+func (s *Server) handleDeleteFault(w http.ResponseWriter, r *http.Request) {
+	if err := s.faults.Delete(r.PathValue("id")); err != nil {
+		if errors.Is(err, fault.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // logMiddleware 记录所有 API 请求的访问日志(JSONL)。处于最外层,鉴权拒绝的请求也记录;
@@ -504,7 +665,12 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 				entry.ForwardResponse = rec.forwardResponse
 				entry.ConvertedResponseBody = rec.convertedResponseBody
 			}
-			s.log.Log(entry)
+			if s.log != nil {
+				s.log.Log(entry)
+			}
+			if s.faults != nil {
+				s.recordFault(rec, status)
+			}
 		}()
 		next.ServeHTTP(rw, r.WithContext(ctx))
 		panicked = false
@@ -730,6 +896,7 @@ func (s *Server) resolveDirectTarget(fullModel, clientFormat string) (*directTar
 func (s *Server) directCapture(ctx context.Context, p provider.Provider, label string) context.Context {
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.provider = label
+		rec.providerName = p.Name()
 		rec.error = "" // 故障转移:清空上一成员遗留的错误
 		key := p.Config().APIKey
 		ctx = gateway.WithCapture(ctx, func(url string, reqBody, respBody []byte, status int) {
@@ -763,6 +930,7 @@ func (s *Server) directComplete(w http.ResponseWriter, r *http.Request, fullMode
 	var status int
 	var body []byte
 	var err error
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
 	if target.single {
 		ctx := s.directCapture(r.Context(), target.p, labelPrefix+target.p.Name())
 		status, body, err = target.p.CompleteRaw(ctx, provider.Kind(clientFormat), reqRaw)
@@ -771,27 +939,40 @@ func (s *Server) directComplete(w http.ResponseWriter, r *http.Request, fullMode
 		} else if status < 200 || status >= 300 {
 			err = redactKey(fmt.Errorf("upstream returned %d: %s", status, truncateBody(body)), target.p.Config().APIKey)
 		}
+		if err != nil {
+			// 单供应商失败即时记录(无聚合时同样触发阻塞)。
+			s.recordMemberFault(rec, status, target.p.Name(), fullModel, err)
+		}
 	} else {
-		// 转发顺序用 TryOrder(跳过冷却中成员,负载均衡关闭时固定优先级序)。
-		order, _ := s.aggregates.TryOrder(target.model)
-		status, body, err = s.failoverRaw(target.model, order, func(member string) (int, []byte, error) {
-			p, _, rerr := s.mgr.Resolve(member + "@" + target.model)
-			if rerr != nil {
-				return 0, nil, rerr
-			}
-			ctx := s.directCapture(r.Context(), p, labelPrefix+p.Name())
-			st, bd, cerr := p.CompleteRaw(ctx, provider.Kind(clientFormat), reqRaw)
-			if cerr != nil {
-				return 0, nil, redactKey(cerr, p.Config().APIKey)
-			}
-			if st < 200 || st >= 300 {
-				return st, bd, redactKey(fmt.Errorf("upstream returned %d: %s", st, truncateBody(bd)), p.Config().APIKey)
-			}
-			return st, bd, nil
-		})
+		// 转发顺序用 faultFilteredOrder(跳过冷却中成员 + 剔除被故障禁用的成员)。
+		order, _ := s.faultFilteredOrder(target.model)
+		if len(order) == 0 {
+			err = &fault.BlockedError{Reason: "all providers are currently blocked"}
+		} else {
+			status, body, err = s.failoverRaw(target.model, order, func(member string) (int, []byte, error) {
+				p, _, rerr := s.mgr.Resolve(member + "@" + target.model)
+				if rerr != nil {
+					return 0, nil, rerr
+				}
+				ctx := s.directCapture(r.Context(), p, labelPrefix+p.Name())
+				st, bd, cerr := p.CompleteRaw(ctx, provider.Kind(clientFormat), reqRaw)
+				if cerr != nil {
+					e := redactKey(cerr, p.Config().APIKey)
+					s.recordMemberFault(rec, 0, p.Name(), fullModel, e)
+					return 0, nil, e
+				}
+				if st < 200 || st >= 300 {
+					e := redactKey(fmt.Errorf("upstream returned %d: %s", st, truncateBody(bd)), p.Config().APIKey)
+					s.recordMemberFault(rec, st, p.Name(), fullModel, e)
+					return st, bd, e
+				}
+				return st, bd, nil
+			})
+		}
 	}
 	if err != nil {
-		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		markBlocked(r.Context(), err)
+		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok && rec.error == "" {
 			rec.error = captureBody(err.Error(), "")
 		}
 		writeRouteError(w, err)
@@ -820,7 +1001,8 @@ func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel 
 	if reqRaw == nil {
 		reqRaw = raw
 	}
-	if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+	rec, _ := r.Context().Value(logCtxKey).(*logRecord)
+	if rec != nil {
 		rec.model = fullModel
 		rec.kind = clientFormat
 		// 直通无格式转换:不记录客户端原始请求体(request_body),只记 forward_*。
@@ -828,7 +1010,8 @@ func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel 
 		rec.convertedResponseBody = ""
 	}
 	routeError := func(err error) {
-		if rec, ok := r.Context().Value(logCtxKey).(*logRecord); ok {
+		markBlocked(r.Context(), err)
+		if rec != nil && rec.error == "" {
 			rec.error = captureBody(err.Error(), "")
 		}
 		writeRouteError(w, err)
@@ -838,19 +1021,27 @@ func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel 
 		ctx := s.directCapture(r.Context(), target.p, labelPrefix+target.p.Name())
 		resp, err := target.p.StreamRaw(ctx, provider.Kind(clientFormat), reqRaw)
 		if err != nil {
-			routeError(redactKey(err, target.p.Config().APIKey))
+			e := redactKey(err, target.p.Config().APIKey)
+			s.recordMemberFault(rec, 0, target.p.Name(), fullModel, e)
+			routeError(e)
 			return true
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
 			resp.Body.Close()
-			routeError(redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), target.p.Config().APIKey))
+			e := redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), target.p.Config().APIKey)
+			s.recordMemberFault(rec, resp.StatusCode, target.p.Name(), fullModel, e)
+			routeError(e)
 			return true
 		}
 		body = resp.Body
 	} else {
-		// 聚合:转发顺序用 TryOrder(跳过冷却中成员);闭包内把非 2xx 转为 error 以便切换成员。
-		order, _ := s.aggregates.TryOrder(target.model)
+		// 聚合:转发顺序用 faultFilteredOrder(跳过冷却中成员 + 剔除被故障禁用的成员)。
+		order, _ := s.faultFilteredOrder(target.model)
+		if len(order) == 0 {
+			routeError(&fault.BlockedError{Reason: "all providers are currently blocked"})
+			return true
+		}
 		err := s.failoverForward(target.model, order, func(member string) error {
 			p, _, rerr := s.mgr.Resolve(member + "@" + target.model)
 			if rerr != nil {
@@ -859,12 +1050,16 @@ func (s *Server) directStream(w http.ResponseWriter, r *http.Request, fullModel 
 			ctx := s.directCapture(r.Context(), p, labelPrefix+p.Name())
 			resp, serr := p.StreamRaw(ctx, provider.Kind(clientFormat), reqRaw)
 			if serr != nil {
-				return redactKey(serr, p.Config().APIKey)
+				e := redactKey(serr, p.Config().APIKey)
+				s.recordMemberFault(rec, 0, p.Name(), fullModel, e)
+				return e
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				defer resp.Body.Close()
 				data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
-				return redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), p.Config().APIKey)
+				e := redactKey(fmt.Errorf("upstream returned %d: %s", resp.StatusCode, truncateBody(data)), p.Config().APIKey)
+				s.recordMemberFault(rec, resp.StatusCode, p.Name(), fullModel, e)
+				return e
 			}
 			body = resp.Body
 			return nil
@@ -1101,6 +1296,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, req *gatewa
 func (s *Server) streamComplete(ctx context.Context, req *gateway.Request, fullModel string, p provider.Provider, model, label, kind string) (io.ReadCloser, string, error) {
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.provider = label
+		rec.providerName = p.Name()
 		rec.kind = kind
 		rec.error = "" // 故障转移:清空上一成员遗留的错误
 		// 注入转发详情收集器:记录转发到哪、发了什么、回了什么(抹除 api_key)。
@@ -1138,12 +1334,16 @@ func (s *Server) streamComplete(ctx context.Context, req *gateway.Request, fullM
 		}
 	}
 	redacted := redactKey(err, p.Config().APIKey)
+	upstream := 0
+	var sg interface{ HTTPStatus() int }
+	if errors.As(err, &sg) {
+		upstream = sg.HTTPStatus()
+	}
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.error = captureBody(redacted.Error(), "")
-		var sg interface{ HTTPStatus() int }
-		if errors.As(err, &sg) {
-			rec.upstreamStatus = sg.HTTPStatus()
-		}
+		rec.upstreamStatus = upstream
+		// 故障转移中途即时记录:即使后续成员成功,该失败成员也已被记录(可触发阻塞)。
+		s.recordMemberFault(rec, upstream, p.Name(), fullModel, redacted)
 	}
 	return nil, "", redacted
 }
@@ -1196,6 +1396,11 @@ func (s *Server) streamRoute(ctx context.Context, req *gateway.Request) (io.Read
 	routed := s.resolveAliasedModel(fullModel)
 	base := provider.StripContextMarker(routed)
 	if members, ok := s.aggregateMembers(base); ok {
+		if len(members) == 0 {
+			err := &fault.BlockedError{Reason: "all providers are currently blocked"}
+			markBlocked(ctx, err)
+			return nil, "", err
+		}
 		var body io.ReadCloser
 		var upFormat string
 		err := s.failoverForward(base, members, func(member string) error {
@@ -1214,6 +1419,7 @@ func (s *Server) streamRoute(ctx context.Context, req *gateway.Request) (io.Read
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")
 		}
+		markBlocked(ctx, err)
 		return nil, "", err
 	}
 	return s.streamComplete(ctx, req, fullModel, p, model, p.Name(), string(p.ModelKind(model)))
@@ -1259,7 +1465,17 @@ func (s *Server) writeSSE(w http.ResponseWriter, rec *logRecord, clientFormat, u
 // 聚合模型的解析与故障转移由 route/streamRoute/routeGroup/streamGroupRoute
 // 在调用本函数前先走 aggregateMembers 分支。
 func (s *Server) resolveModel(model string) (provider.Provider, string, error) {
-	return s.mgr.Resolve(provider.StripContextMarker(model))
+	p, m, err := s.mgr.Resolve(provider.StripContextMarker(model))
+	if err != nil {
+		return nil, "", err
+	}
+	// 供应商被故障(余额不足等)禁用时,单独请求直接返回阻塞原因,不转发上游。
+	if s.faults != nil {
+		if reason, blocked := s.faults.Block(p.Name()); blocked {
+			return nil, "", &fault.BlockedError{Provider: p.Name(), Reason: reason}
+		}
+	}
+	return p, m, nil
 }
 
 // splitContextMarker 把模型 id 拆为基础名与上下文标记(如 [1M]);无合法标记时
@@ -1345,12 +1561,34 @@ func (s *Server) resolveAliasedModel(model string) string {
 }
 
 // aggregateMembers 若模型是聚合模型,返回其故障转移尝试顺序(轮询起点、跳过冷却中
-// 的成员;全部冷却时返回全部成员)。未启用聚合或模型非聚合返回 false。
+// 的成员;全部冷却时返回全部成员),并剔除被故障禁用的供应商。未启用聚合或模型非聚合
+// 返回 false。聚合的全部成员都被禁用时返回 ok=true 且 members 为空,调用方据此返回
+// 阻塞错误。
 func (s *Server) aggregateMembers(model string) ([]string, bool) {
 	if s.aggregates == nil {
 		return nil, false
 	}
-	return s.aggregates.TryOrder(model)
+	return s.faultFilteredOrder(model)
+}
+
+// faultFilteredOrder 返回聚合模型的故障转移顺序(轮询/冷却语义同 aggregates.TryOrder),
+// 但剔除被故障禁用的供应商。模型非聚合返回 ok=false;聚合全部成员被禁用时返回 ok=true
+// 且空切片。
+func (s *Server) faultFilteredOrder(model string) ([]string, bool) {
+	order, ok := s.aggregates.TryOrder(model)
+	if !ok {
+		return nil, false
+	}
+	if s.faults == nil {
+		return order, true
+	}
+	out := make([]string, 0, len(order))
+	for _, m := range order {
+		if _, blocked := s.faults.Block(m); !blocked {
+			out = append(out, m)
+		}
+	}
+	return out, true
 }
 
 // failoverForward 对聚合成员做故障转移:依次调用 send(member),首个成功返回 nil;
@@ -1380,6 +1618,7 @@ func (s *Server) failoverForward(base string, members []string, send func(member
 func (s *Server) complete(ctx context.Context, req *gateway.Request, fullModel string, p provider.Provider, model, label, kind string) (*gateway.Response, error) {
 	if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 		rec.provider = label
+		rec.providerName = p.Name()
 		rec.kind = kind
 		rec.error = "" // 故障转移:清空上一成员遗留的错误
 		// 注入转发详情收集器:记录转发到哪、发了什么、回了什么(抹除 api_key)。
@@ -1395,13 +1634,17 @@ func (s *Server) complete(ctx context.Context, req *gateway.Request, fullModel s
 	resp, err := p.Complete(ctx, req)
 	if err != nil {
 		redacted := redactKey(err, p.Config().APIKey)
+		upstream := 0
+		var sg interface{ HTTPStatus() int }
+		if errors.As(err, &sg) {
+			upstream = sg.HTTPStatus()
+		}
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			// 日志只记录已抹除 api_key 的错误,并限制长度(避免超大上游错误体撑爆日志)。
 			rec.error = captureBody(redacted.Error(), "")
-			var sg interface{ HTTPStatus() int }
-			if errors.As(err, &sg) {
-				rec.upstreamStatus = sg.HTTPStatus()
-			}
+			rec.upstreamStatus = upstream
+			// 故障转移中途即时记录:即使后续成员成功,该失败成员也已被记录(可触发阻塞)。
+			s.recordMemberFault(rec, upstream, p.Name(), fullModel, redacted)
 		}
 		// 防止上游在错误体中回显 api_key 导致经 502 泄露。
 		return nil, redacted
@@ -1421,6 +1664,11 @@ func (s *Server) route(ctx context.Context, req *gateway.Request) (*gateway.Resp
 	routed := s.resolveAliasedModel(fullModel)
 	base := provider.StripContextMarker(routed)
 	if members, ok := s.aggregateMembers(base); ok {
+		if len(members) == 0 {
+			err := &fault.BlockedError{Reason: "all providers are currently blocked"}
+			markBlocked(ctx, err)
+			return nil, err
+		}
 		var resp *gateway.Response
 		err := s.failoverForward(base, members, func(member string) error {
 			p, model, rerr := s.mgr.Resolve(member + "@" + base)
@@ -1435,6 +1683,7 @@ func (s *Server) route(ctx context.Context, req *gateway.Request) (*gateway.Resp
 	}
 	p, model, err := s.resolveModel(routed)
 	if err != nil {
+		markBlocked(ctx, err)
 		return nil, err
 	}
 	return s.complete(ctx, req, fullModel, p, model, p.Name(), string(p.ModelKind(model)))
@@ -1479,6 +1728,12 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		out = append(out, sanitizeConfig(c))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleListProviderTemplates 返回内置的供应商接入模板目录(不含任何密钥),
+// 供前端「模板库」让用户一键填入 base_url/格式/模型,仅需补 api_key 即可接入。
+func (s *Server) handleListProviderTemplates(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, providertemplates.All())
 }
 
 // handleGetProvider 返回单个供应商配置(api_key 掩码);不存在时返回 404。
@@ -1829,7 +2084,8 @@ func writeKeyError(w http.ResponseWriter, err error) {
 
 // modelEntry 是模型列表中的一项,id 为 "{供应商名}@{模型名}" 或聚合裸名。
 // 遵循 OpenAI 兼容 /models 规范,元素仅含 id/object/owned_by;
-// context_window 为供应商模型配置的上下文窗口(k 为单位,聚合模型/未配置时省略)。
+// context_window 为上下文窗口(k 为单位):供应商模型取配置值,聚合模型取全部有效
+// 成员的最小值(见 aggregateContextWindowK),未配置时省略。
 type modelEntry struct {
 	ID            string `json:"id"`
 	Object        string `json:"object"`
@@ -1867,14 +2123,22 @@ func (s *Server) allModelEntries() []modelEntry {
 			})
 		}
 	}
-	// 聚合模型(裸名,挂在统一供应商下)。
+	// 聚合模型(裸名,挂在统一供应商下)。context_window 取全部有效成员的最小值
+	// (故障转移/负载均衡到任一成员都不超窗;成员未配置窗口时按默认 200k 参与取小)。
 	if s.aggregates != nil {
 		for _, a := range s.aggregates.Models() {
 			if seen[a.Name] {
 				continue
 			}
 			seen[a.Name] = true
-			entries = append(entries, modelEntry{ID: a.Name, Object: "model", OwnedBy: "unified"})
+			// 复用 aggregate.Model.Members(aggregate.Models 已算好),避免
+			// 再次全量扫描供应商重推成员(该函数在模型列表与热路径上都被调用)。
+			entries = append(entries, modelEntry{
+				ID:            a.Name,
+				Object:        "model",
+				OwnedBy:       "unified",
+				ContextWindow: s.membersContextWindowK(a.Name, a.Members),
+			})
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
@@ -1941,11 +2205,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, label string, v any) boo
 	return true
 }
 
-// writeRouteError 按错误类型映射转发端点状态:未知供应商 -> 404,上游错误 -> 502。
+// writeRouteError 按错误类型映射转发端点状态:未知供应商 -> 404,供应商被故障禁用 -> 503,
+// 其余上游错误 -> 502。
 func writeRouteError(w http.ResponseWriter, err error) {
+	var be *fault.BlockedError
 	switch {
 	case errors.Is(err, provider.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
+	case errors.As(err, &be):
+		writeError(w, http.StatusServiceUnavailable, err)
 	default:
 		writeError(w, http.StatusBadGateway, err)
 	}

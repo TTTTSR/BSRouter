@@ -182,6 +182,8 @@ code, pre { font-family: var(--mono); }
 /* 模型管理页行内编辑的上下文窗口输入 */
 .table .table-window { width: 72px; padding: 4px 6px; font-size: 12px; }
 .table .actions { white-space: nowrap; }
+/* 故障提示页:故障内容列折行显示,避免超长错误体撑破表格 */
+.table .fault-msg { max-width: 40vw; word-break: break-word; }
 
 /* ---- 徽标 ---- */
 .badge {
@@ -310,6 +312,17 @@ code, pre { font-family: var(--mono); }
 .model-row .btn { flex: none; }
 /* 上下文窗口(k)输入:固定窄宽,不挤占模型名 */
 .model-row .model-window { flex: none; width: 76px; min-width: 76px; }
+
+/* ---- 供应商模板库 ---- */
+.template-list { display: flex; flex-direction: column; gap: 8px; }
+.template-item {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px;
+}
+.template-item:hover { background: var(--surface); }
+.template-item-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.template-item-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.template-item .btn { flex: none; }
 
 /* ---- 弹窗(扁平) ---- */
 .modal-overlay {

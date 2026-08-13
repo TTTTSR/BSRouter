@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 
+	"BSRouter/internal/fault"
 	"BSRouter/internal/gateway"
 	"BSRouter/internal/group"
 	"BSRouter/internal/provider"
@@ -145,7 +146,8 @@ func (s *Server) handleGroupURL(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGroupModels(w http.ResponseWriter, g group.Config) {
 	entries := make([]modelEntry, 0, len(g.Models))
 	for _, m := range g.Models {
-		entries = append(entries, modelEntry{ID: m, Object: "model", OwnedBy: g.Name})
+		// context_window 与统一列表一致:合成 id 取供应商配置,聚合裸名取成员最小值。
+		entries = append(entries, modelEntry{ID: m, Object: "model", OwnedBy: g.Name, ContextWindow: s.modelContextWindowK(m)})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	writeJSON(w, http.StatusOK, modelList{Object: "list", Data: entries})
@@ -327,6 +329,11 @@ func (s *Server) streamGroupRoute(ctx context.Context, g group.Config, req *gate
 	base := provider.StripContextMarker(routed)
 	label, kind := g.Name+"→", string(g.Kind)
 	if members, ok := s.aggregateMembers(base); ok {
+		if len(members) == 0 {
+			err := &fault.BlockedError{Reason: "all providers are currently blocked"}
+			markBlocked(ctx, err)
+			return nil, "", err
+		}
 		var body io.ReadCloser
 		var upFormat string
 		err := s.failoverForward(base, members, func(member string) error {
@@ -345,6 +352,7 @@ func (s *Server) streamGroupRoute(ctx context.Context, g group.Config, req *gate
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")
 		}
+		markBlocked(ctx, err)
 		return nil, "", err
 	}
 	return s.streamComplete(ctx, req, fullModel, p, model, label+p.Name(), kind)
@@ -370,6 +378,11 @@ func (s *Server) routeGroup(ctx context.Context, g group.Config, req *gateway.Re
 	base := provider.StripContextMarker(routed)
 	label, kind := g.Name+"→", string(g.Kind)
 	if members, ok := s.aggregateMembers(base); ok {
+		if len(members) == 0 {
+			err := &fault.BlockedError{Reason: "all providers are currently blocked"}
+			markBlocked(ctx, err)
+			return nil, err
+		}
 		var resp *gateway.Response
 		err := s.failoverForward(base, members, func(member string) error {
 			p, model, rerr := s.mgr.Resolve(member + "@" + base)
@@ -387,6 +400,7 @@ func (s *Server) routeGroup(ctx context.Context, g group.Config, req *gateway.Re
 		if rec, ok := ctx.Value(logCtxKey).(*logRecord); ok {
 			rec.error = captureBody(err.Error(), "")
 		}
+		markBlocked(ctx, err)
 		return nil, err
 	}
 	return s.complete(ctx, req, fullModel, p, model, label+p.Name(), kind)

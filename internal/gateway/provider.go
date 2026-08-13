@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )// Client 是上游连接配置,三种接口格式共用。
+// BasePath 是 base_url 与端点之间的路径段(如 OpenAI 的 "/v1");留空回退 "/v1"。
+// 部分厂商使用非 /v1 的版本段(如智谱 /api/paas/v4、百度千帆 /v2、火山方舟 /api/v3),
+// 通过 BasePath 覆盖即可让三种格式适配器命中正确端点。
 type Client struct {
-	BaseURL string
-	APIKey  string
-	HTTP    *http.Client
+	BaseURL  string
+	BasePath string
+	APIKey   string
+	HTTP     *http.Client
 }
 
 // Provider 是各格式适配器统一实现的接口,消费/产出规范化类型。
@@ -43,19 +48,46 @@ func (e *apiError) Error() string {
 func (e *apiError) HTTPStatus() int { return e.StatusCode }
 
 // resolveClient 从共享配置解析出上游地址、密钥与 HTTP 客户端,未设置时使用默认值。
-func resolveClient(c *Client, defaultBaseURL string) (baseURL, apiKey string, httpc *http.Client) {
+func resolveClient(c *Client, defaultBaseURL string) (baseURL, basePath, apiKey string, httpc *http.Client) {
 	baseURL = defaultBaseURL
 	if c != nil {
 		if c.BaseURL != "" {
 			baseURL = c.BaseURL
 		}
+		basePath = c.BasePath
 		apiKey = c.APIKey
 		httpc = c.HTTP
 	}
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 120 * time.Second}
 	}
-	return baseURL, apiKey, httpc
+	return baseURL, basePath, apiKey, httpc
+}
+
+// normalizeBasePath 归一化路径段:空串回退 "/v1";"/" 表示根路径(端点直接拼到
+// base_url 后,如 Gemini 的 .../v1beta/openai);否则保证以 "/" 开头且去掉尾部斜杠。
+// 供三种格式适配器与模型列表 URL 共用,确保 base_url + base_path + 端点拼接一致。
+func normalizeBasePath(p string) string {
+	switch p {
+	case "":
+		return "/v1"
+	case "/":
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return strings.TrimRight(p, "/")
+}
+
+// joinPath 拼接上游请求地址:去 base_url 尾部斜杠 + 归一化 base_path + 端点。
+func joinPath(baseURL, basePath, endpoint string) string {
+	return strings.TrimRight(baseURL, "/") + normalizeBasePath(basePath) + endpoint
+}
+
+// JoinPath 是 joinPath 的导出形态,供 provider 等包复用 base_path 拼接逻辑。
+func JoinPath(baseURL, basePath, endpoint string) string {
+	return joinPath(baseURL, basePath, endpoint)
 }
 
 // maxUpstreamBody 限制读取上游响应体的上限,防止异常上游耗尽内存。

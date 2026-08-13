@@ -1,0 +1,233 @@
+[
+  {
+    "name": "openai",
+    "display_name": "OpenAI",
+    "category": "international",
+    "description": "OpenAI 官方 API(GPT-5 / GPT-4 / o 系列)",
+    "kind": "completion",
+    "base_url": "https://api.openai.com",
+    "note": "密钥为 sk- 开头的项目/组织 Key,来源 platform.openai.com。gpt-5.x 与 o 系列仅支持 responses 格式(已在模型级标注),gpt-4o/4.1 双格式可用;模型列表可「同步模型」刷新。"
+  },
+  {
+    "name": "anthropic",
+    "display_name": "Anthropic",
+    "category": "international",
+    "description": "Claude 官方 API(Opus / Sonnet / Haiku)",
+    "kind": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "note": "密钥为 sk-ant- 开头,来源 console.anthropic.com;网关自动携带 x-api-key 与 anthropic-version 头。仅支持 Anthropic Messages 格式。"
+  },
+  {
+    "name": "google",
+    "display_name": "Google Gemini",
+    "category": "international",
+    "description": "Gemini 官方 API(经 OpenAI 兼容端点)",
+    "kind": "completion",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "base_path": "/",
+    "note": "走 Gemini 的 OpenAI 兼容端点(/v1beta/openai),使用 Gemini API Key 作 Bearer,来源 aistudio.google.com。原生 Gemini 接口格式网关暂不支持,请用此兼容端点。"
+  },
+  {
+    "name": "xai",
+    "display_name": "xAI Grok",
+    "category": "international",
+    "description": "Grok 官方 API",
+    "kind": "completion",
+    "base_url": "https://api.x.ai",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 console.x.ai。grok-4 上下文窗口可能随版本调整,可「同步模型」确认。"
+  },
+  {
+    "name": "mistral",
+    "display_name": "Mistral AI",
+    "category": "international",
+    "description": "Mistral 官方 API(Large / Medium / Small / Codestral)",
+    "kind": "completion",
+    "base_url": "https://api.mistral.ai",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 console.mistral.ai。*‑latest 为滚动别名,始终指向当前代次。"
+  },
+  {
+    "name": "minimax",
+    "display_name": "MiniMax(国际站)",
+    "category": "international",
+    "description": "MiniMax 海外站(M2 / M3 / Text-01)",
+    "kind": "completion",
+    "base_url": "https://api.minimaxi.com",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 platform.minimaxi.com。国际站与国内站(见 minimax-cn)密钥不通用。"
+  },
+  {
+    "name": "deepseek",
+    "display_name": "DeepSeek",
+    "category": "chinese",
+    "description": "DeepSeek 官方 API(V4 Pro / Flash)",
+    "kind": "completion",
+    "base_url": "https://api.deepseek.com",
+    "usage_url": "https://api.deepseek.com/user/balance",
+    "note": "OpenAI 兼容 /v1,Bearer 鉴权,来源 platform.deepseek.com。1M 上下文、支持 thinking;亦提供 Anthropic 兼容与 Responses 端点,此处按标准 completion 接入。"
+  },
+  {
+    "name": "moonshot",
+    "display_name": "Moonshot Kimi(月之暗面)",
+    "category": "chinese",
+    "description": "Kimi 官方 API(K3 / K2.x)",
+    "kind": "completion",
+    "base_url": "https://api.moonshot.cn",
+    "usage_url": "https://api.moonshot.cn/v1/users/me/balance",
+    "note": "OpenAI 兼容 /v1,Bearer 鉴权,来源 platform.moonshot.cn。kimi-latest/kimi-k2/moonshot-v1-* 已下线,当前为 kimi-k3 与 k2.x 系列。"
+  },
+  {
+    "name": "zhipu",
+    "display_name": "Zhipu GLM(智谱)",
+    "category": "chinese",
+    "description": "智谱 GLM 官方 API(GLM-5 / 4.x)",
+    "kind": "completion",
+    "base_url": "https://open.bigmodel.cn/api/paas",
+    "base_path": "/v4",
+    "note": "路径前缀为 /api/paas/v4(非 /v1,已通过 base_path 处理)。密钥格式 {id}.{secret},来源 open.bigmodel.cn。上下文窗口以官方文档为准。"
+  },
+  {
+    "name": "dashscope",
+    "display_name": "Alibaba Qwen(百炼/DashScope)",
+    "category": "chinese",
+    "description": "通义千问官方 API(Qwen3.x / plus / max)",
+    "kind": "completion",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
+    "note": "OpenAI 兼容端点位于 /compatible-mode/v1(base_url 已含前缀)。sk- 开头 Key,来源百炼控制台 bailian.console.aliyun.com。国际站用 dashscope-intl.aliyuncs.com。"
+  },
+  {
+    "name": "qianfan",
+    "display_name": "Baidu Qianfan ERNIE(文心)",
+    "category": "chinese",
+    "description": "百度千帆官方 API(ERNIE 系列)",
+    "kind": "completion",
+    "base_url": "https://qianfan.baidubce.com",
+    "base_path": "/v2",
+    "note": "OpenAI 兼容端点路径为 /v2(非 /v1,已通过 base_path 处理)。Bearer 鉴权(应用管理里的 API Key),来源 qianfan.cloud.baidu.com。模型名自带 -8k/-128k/-256k/-1m 窗口后缀。"
+  },
+  {
+    "name": "volcengine",
+    "display_name": "ByteDance Volcano Ark — Doubao(豆包)",
+    "category": "chinese",
+    "description": "火山方舟官方 API(豆包 Seed 系列)",
+    "kind": "completion",
+    "base_url": "https://ark.cn-beijing.volces.com",
+    "base_path": "/api/v3",
+    "note": "OpenAI 兼容端点路径为 /api/v3(非 /v1,已通过 base_path 处理)。Bearer 鉴权(方舟 API Key 管理),来源 console.volcengine.com/ark。旧版按「接入点 ID(ep-xxx)」调用,当前已支持 doubao-seed-* 模型名直连。"
+  },
+  {
+    "name": "minimax-cn",
+    "display_name": "MiniMax(国内站)",
+    "category": "chinese",
+    "description": "MiniMax 国内站(M2 / M3 / Text-01)",
+    "kind": "completion",
+    "base_url": "https://api.minimax.chat",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 MiniMax 开放平台国内站。与国际站(minimax)密钥不通用。"
+  },
+  {
+    "name": "hunyuan",
+    "display_name": "Tencent Hunyuan(混元)",
+    "category": "chinese",
+    "description": "腾讯混元官方 API(TurboS / T1)",
+    "kind": "completion",
+    "base_url": "https://api.hunyuan.cloud.tencent.com",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 console.cloud.tencent.com/hunyuan。旗舰 turbos/t1 为 128k(可扩至 256k)。"
+  },
+  {
+    "name": "siliconflow",
+    "display_name": "SiliconFlow(硅基流动)",
+    "category": "chinese",
+    "description": "开放模型聚合平台(DeepSeek / Qwen / GLM / Kimi / Llama)",
+    "kind": "completion",
+    "base_url": "https://api.siliconflow.cn",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权(sk-),来源 cloud.siliconflow.cn。模型 ID 为 组织/模型 命名,仅托管开源模型;有免费额度,Pro/ 前缀为付费档。"
+  },
+  {
+    "name": "stepfun",
+    "display_name": "StepFun(阶跃星辰)",
+    "category": "chinese",
+    "description": "阶跃星辰官方 API(Step 系列)",
+    "kind": "completion",
+    "base_url": "https://api.stepfun.com",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 platform.stepfun.com。step-3 为当前旗舰。"
+  },
+  {
+    "name": "baichuan",
+    "display_name": "Baichuan(百川智能)",
+    "category": "chinese",
+    "description": "百川官方 API(Baichuan4 / M 系列)",
+    "kind": "completion",
+    "base_url": "https://api.baichuan-ai.com",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 platform.baichuan-ai.com。M 系列为混合推理模型。"
+  },
+  {
+    "name": "infinigence",
+    "display_name": "Infinigence(无问芯穹)",
+    "category": "chinese",
+    "description": "无问芯穹 MaaS(DeepSeek / Qwen / GLM / Llama)",
+    "kind": "completion",
+    "base_url": "https://cloud.infini-ai.com/maas",
+    "note": "OpenAI 兼容端点路径为 /maas/v1(base_url 已含 /maas 前缀)。Bearer 鉴权(Infinikey),来源 cloud.infini-ai.com。模型 ID 为 组织/模型 命名。"
+  },
+  {
+    "name": "lingyiwanwu",
+    "display_name": "01.AI(零一万物)",
+    "category": "chinese",
+    "description": "零一万物官方 API(Yi 系列)",
+    "kind": "completion",
+    "base_url": "https://api.lingyiwanwu.com",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权。注意:01.AI 已于 2025 年收缩公开 LLM API 业务,新 Key 发放可能已关闭,接入前先确认可正常开 Key。"
+  },
+  {
+    "name": "sensenova",
+    "display_name": "SenseNova(商汤日日新)",
+    "category": "chinese",
+    "description": "商汤官方 API(SenseNova / 托管 DeepSeek)",
+    "kind": "completion",
+    "base_url": "https://api.sensenova.cn/compatible-mode",
+    "note": "OpenAI 兼容端点路径为 /compatible-mode/v1(base_url 已含前缀)。Bearer 鉴权,来源 platform.sensenova.cn。商汤与 DeepSeek 合并后同时托管 DeepSeek 模型。"
+  },
+  {
+    "name": "openrouter",
+    "display_name": "OpenRouter",
+    "category": "aggregator",
+    "description": "聚合平台,统一接入数百个模型(GPT / Claude / Gemini / Llama …)",
+    "kind": "completion",
+    "base_url": "https://openrouter.ai/api",
+    "note": "标准 OpenAI 兼容 /v1(端点 https://openrouter.ai/api/v1),Bearer 鉴权,来源 openrouter.ai。模型 ID 为 组织/模型 形式,数量上千,建议用「同步模型」拉取全量。"
+  },
+  {
+    "name": "groq",
+    "display_name": "Groq",
+    "category": "aggregator",
+    "description": "高速推理平台(Llama / DeepSeek-R1 蒸馏 / Qwen 开源模型)",
+    "kind": "completion",
+    "base_url": "https://api.groq.com/openai",
+    "note": "OpenAI 兼容端点位于 /openai/v1(base_url 已含前缀),Bearer 鉴权,来源 console.groq.com。仅托管开源模型,推理速度快。"
+  },
+  {
+    "name": "together",
+    "display_name": "Together AI",
+    "category": "aggregator",
+    "description": "开源模型平台(Llama / Qwen / DeepSeek)",
+    "kind": "completion",
+    "base_url": "https://api.together.xyz",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 api.together.ai。模型 ID 为 组织/模型 命名,「同步模型」可拉全量。"
+  },
+  {
+    "name": "fireworks",
+    "display_name": "Fireworks AI",
+    "category": "aggregator",
+    "description": "开源模型推理平台(Llama / Qwen / DeepSeek)",
+    "kind": "completion",
+    "base_url": "https://api.fireworks.ai/inference",
+    "note": "OpenAI 兼容端点位于 /inference/v1(base_url 已含前缀),Bearer 鉴权,来源 fireworks.ai。模型 ID 为 accounts/fireworks/models/ 命名,「同步模型」可拉全量。"
+  },
+  {
+    "name": "cerebras",
+    "display_name": "Cerebras",
+    "category": "aggregator",
+    "description": "高速推理平台(Llama / GPT-OSS / DeepSeek-R1 蒸馏)",
+    "kind": "completion",
+    "base_url": "https://api.cerebras.ai",
+    "note": "标准 OpenAI 兼容 /v1,Bearer 鉴权,来源 cloud.cerebras.ai。仅托管开源模型,推理速度快。"
+  }
+]

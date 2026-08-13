@@ -1,24 +1,28 @@
 import { useEffect, useState } from 'react'
 import { APIError, api, clearAPIKey, getAPIKey, setAPIKey } from './lib/api'
-import { IconBox, IconCodex, IconDoc, IconKey, IconServer, IconTerminal } from './lib/icons'
+import { IconAlert, IconBox, IconCodex, IconDoc, IconKey, IconServer, IconTerminal, IconZcode } from './lib/icons'
 import { Button, Field, Input } from './components/ui'
 import Providers from './pages/Providers'
 import Models from './pages/Models'
 import Logs from './pages/Logs'
+import Faults from './pages/Faults'
 import ApiKeys from './pages/ApiKeys'
 import ClaudePresets from './pages/ClaudePresets'
 import CodexPresets from './pages/CodexPresets'
+import ZcodePresets from './pages/ZcodePresets'
 import type { ReactNode } from 'react'
 
-type Page = 'providers' | 'models' | 'logs' | 'apikeys' | 'claudepresets' | 'codexpresets'
+type Page = 'providers' | 'models' | 'logs' | 'faults' | 'apikeys' | 'claudepresets' | 'codexpresets' | 'zcodepresets'
 
 const NAV: { key: Page; label: string; icon: ReactNode }[] = [
   { key: 'providers', label: '供应商管理', icon: <IconServer /> },
   { key: 'models', label: '模型管理', icon: <IconBox /> },
   { key: 'logs', label: '日志查看', icon: <IconDoc /> },
+  { key: 'faults', label: '故障提示', icon: <IconAlert /> },
   { key: 'apikeys', label: 'API Key', icon: <IconKey /> },
   { key: 'claudepresets', label: 'Claude 预设', icon: <IconTerminal /> },
   { key: 'codexpresets', label: 'Codex 预设', icon: <IconCodex /> },
+  { key: 'zcodepresets', label: 'zcode 预设', icon: <IconZcode /> },
 ]
 
 function Login({ onAuthed }: { onAuthed: () => void }) {
@@ -144,9 +148,11 @@ export default function App() {
         {page === 'providers' ? <Providers /> : null}
         {page === 'models' ? <Models /> : null}
         {page === 'logs' ? <Logs /> : null}
+        {page === 'faults' ? <Faults /> : null}
         {page === 'apikeys' ? <ApiKeys /> : null}
         {page === 'claudepresets' ? <ClaudePresets /> : null}
         {page === 'codexpresets' ? <CodexPresets /> : null}
+        {page === 'zcodepresets' ? <ZcodePresets /> : null}
       </main>
     </div>
   )

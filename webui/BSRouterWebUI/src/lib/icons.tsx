@@ -36,6 +36,18 @@ export function IconServer({ size }: IconBase) {
   )
 }
 
+// 模板库(网格)
+export function IconGrid({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <rect x="3" y="3" width="7" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="3" y="14" width="7" height="7" />
+      <rect x="14" y="14" width="7" height="7" />
+    </S>
+  )
+}
+
 // 模型(立方体)
 export function IconBox({ size }: IconBase) {
   return (
@@ -185,6 +197,26 @@ export function IconCodex({ size }: IconBase) {
     <S size={size}>
       <polyline points="16 18 22 12 16 6" />
       <polyline points="8 6 2 12 8 18" />
+    </S>
+  )
+}
+
+// 故障提示(警示三角)
+export function IconAlert({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </S>
+  )
+}
+
+// zcode 预设(Z 字折线)
+export function IconZcode({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <polyline points="20 5 4 5 20 19 4 19" />
     </S>
   )
 }

@@ -14,10 +14,34 @@ export interface ProviderConfig {
   kind: Kind
   name: string
   base_url: string
+  base_path?: string
   api_key: string
   models?: ModelConfig[]
   usage_url?: string
   models_url?: string
+  // 故障阻塞配置(供应商编辑表单可改,默认启用):
+  // - 限流:错误码默认 429,时长默认 120 分钟(rate_limit_duration_minutes),可经
+  //   rate_limit_enabled=false 关闭该分类阻塞;
+  // - 余额不足:错误码默认 402,0 = 禁用该分类阻塞。
+  rate_limit_status?: number
+  rate_limit_enabled?: boolean
+  rate_limit_duration_minutes?: number
+  insufficient_balance_status?: number
+}
+
+// 内置供应商接入模板:base_url/格式/模型列表 URL 已填好,用户只需补 api_key;
+// 不携带硬编码模型列表,模型用表单里的「获取模型列表」从服务商 API 拉取。
+export interface ProviderTemplate {
+  name: string
+  display_name: string
+  category: 'international' | 'chinese' | 'aggregator' | 'cloud'
+  description?: string
+  kind: Kind
+  base_url: string
+  base_path?: string
+  models_url?: string
+  usage_url?: string
+  note?: string
 }
 
 export interface GroupConfig {
@@ -31,7 +55,7 @@ export interface ModelEntry {
   id: string
   object: string
   owned_by: string
-  // 上下文窗口(k);聚合模型/未配置时省略。
+  // 上下文窗口(k);供应商模型取配置值,聚合裸名取全部有效成员的最小值,未配置时省略。
   context_window?: number
 }
 
@@ -137,6 +161,20 @@ export interface CodexPresetCommand {
   warning?: string
 }
 
+// Z.ai zcode 运行配置预设:把 BSRouter 作为自定义供应商覆盖进本地
+// ~/.zcode/v2/config.json 的 provider map(保留其余内置/自定义供应商与顶层字段)。
+// 预设只配置 api_key 与模型列表:zcode 的模型列表手动配置在 config.json,apply-local
+// 把 models 按模型原生接口格式分割为多个供应商(openai/anthropic/responses),全部走
+// 网关统一 API 入口。models 留空回退网关全部可路由模型;api_key 可选(留空注入网关
+// 默认 key)。
+export interface ZcodePresetConfig {
+  name: string
+  description?: string
+  api_key?: string
+  models?: string[]
+  created_at?: string
+}
+
 // 网关部署形态与出口地址(管理经 /manage/v1/network)。
 export interface NetworkInfo {
   remote: boolean
@@ -154,4 +192,24 @@ export interface AggregateModel {
   members: string[]
   available: string[]
   load_balance?: boolean
+}
+
+// 故障提示:一条已记录的故障(category 为 insufficient_balance/rate_limited/internal/upstream)。
+// expires_at 为自动解除时间(仅限流类);空 = 持久阻塞(需手动删除解除)。
+export interface Fault {
+  id: string
+  timestamp: string
+  category: string
+  message: string
+  model?: string
+  provider?: string
+  status?: number
+  upstream_status?: number
+  expires_at?: string
+}
+
+// 故障列表响应:当前捕捉模式(user/dev)+ 故障列表(最新在前)。
+export interface FaultList {
+  mode: 'user' | 'dev' | string
+  faults: Fault[]
 }

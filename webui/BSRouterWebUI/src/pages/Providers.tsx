@@ -2,25 +2,34 @@ import { useState } from 'react'
 import { api, KINDS, KINDS_LABEL } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { Badge, Button, Empty, ErrorAlert, Field, Input, Modal, Select, Spinner } from '../components/ui'
-import { IconActivity, IconEdit, IconPing, IconPlus, IconRefresh, IconTrash } from '../lib/icons'
-import type { Kind, ModelConfig, PingResult, ProviderConfig } from '../lib/types'
+import { IconActivity, IconEdit, IconGrid, IconPing, IconPlus, IconRefresh, IconTrash } from '../lib/icons'
+import type { Kind, ModelConfig, PingResult, ProviderConfig, ProviderTemplate } from '../lib/types'
 
 function ProviderFormModal({
-  title, initial, onClose, onSaved,
+  title, initial, seed, onClose, onSaved,
 }: {
   title: string
   initial: ProviderConfig | null
+  seed?: ProviderConfig | null
   onClose: () => void
   onSaved: (msg: string) => void
 }) {
   const editing = initial !== null
-  const [kind, setKind] = useState<Kind>(initial?.kind ?? 'completion')
-  const [name, setName] = useState(initial?.name ?? '')
-  const [baseUrl, setBaseUrl] = useState(initial?.base_url ?? '')
+  const base = initial ?? seed ?? null
+  const [kind, setKind] = useState<Kind>(base?.kind ?? 'completion')
+  const [name, setName] = useState(base?.name ?? '')
+  const [baseUrl, setBaseUrl] = useState(base?.base_url ?? '')
+  const [basePath, setBasePath] = useState(base?.base_path ?? '')
   const [apiKey, setApiKey] = useState('')
-  const [models, setModels] = useState<ModelConfig[]>(initial?.models ?? [])
-  const [usageUrl, setUsageUrl] = useState(initial?.usage_url ?? '')
-  const [modelsUrl, setModelsUrl] = useState(initial?.models_url ?? '')
+  const [models, setModels] = useState<ModelConfig[]>(base?.models ?? [])
+  const [usageUrl, setUsageUrl] = useState(base?.usage_url ?? '')
+  const [modelsUrl, setModelsUrl] = useState(base?.models_url ?? '')
+  // 故障阻塞配置:限流(默认 429、120 分钟、启用)与余额不足(默认 402)均可在供应商
+  // 编辑表单自定义;余额不足留空 = 默认 402,填 0 = 禁用该分类。
+  const [rateLimitEnabled, setRateLimitEnabled] = useState(base?.rate_limit_enabled !== false)
+  const [rateLimitStatus, setRateLimitStatus] = useState(base?.rate_limit_status === undefined ? '' : String(base.rate_limit_status))
+  const [rateLimitDuration, setRateLimitDuration] = useState(base?.rate_limit_duration_minutes === undefined ? '' : String(base.rate_limit_duration_minutes))
+  const [insufficientStatus, setInsufficientStatus] = useState(base?.insufficient_balance_status === undefined ? '' : String(base.insufficient_balance_status))
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [fetching, setFetching] = useState(false)
@@ -32,11 +41,25 @@ function ProviderFormModal({
       setErr('存在模型名称为空的行,请填写或删除该行')
       return
     }
+    const rls = rateLimitStatus.trim()
+    const rld = rateLimitDuration.trim()
+    const ibs = insufficientStatus.trim()
+    const rlsN = rls === '' ? undefined : Number(rls)
+    const rldN = rld === '' ? undefined : Number(rld)
+    const ibsN = ibs === '' ? undefined : Number(ibs)
+    if ((rlsN !== undefined && (!Number.isInteger(rlsN) || rlsN < 400 || rlsN > 599)) ||
+        (rldN !== undefined && (!Number.isInteger(rldN) || rldN < 1)) ||
+        (ibsN !== undefined && (!Number.isInteger(ibsN) || ibsN < 0 || ibsN > 599))) {
+      setErr('限流错误码需为 400-599、时长需为正整数(分钟);余额不足错误码需为 0(禁用)或 400-599;留空用默认')
+      return
+    }
     setBusy(true)
     const cfg: ProviderConfig = {
-      kind, name: name.trim(), base_url: baseUrl.trim(), api_key: apiKey.trim(),
+      kind, name: name.trim(), base_url: baseUrl.trim(), base_path: basePath.trim(), api_key: apiKey.trim(),
       models: models.map((m) => ({ name: m.name.trim(), kind: m.kind, kinds: m.kinds, context_window: m.context_window })),
       usage_url: usageUrl.trim(), models_url: modelsUrl.trim(),
+      rate_limit_enabled: rateLimitEnabled, rate_limit_status: rlsN, rate_limit_duration_minutes: rldN,
+      insufficient_balance_status: ibsN,
     }
     try {
       if (editing) {
@@ -101,6 +124,9 @@ function ProviderFormModal({
         <Field label="Base URL" hint={editing ? '修改会立即影响后续转发' : undefined}>
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com" />
         </Field>
+        <Field label="Base Path" hint="base_url 与端点之间的路径段;留空默认 /v1(智谱 /api/paas/v4、百度 /v2、火山 /api/v3 等已由模板填好)">
+          <Input value={basePath} onChange={(e) => setBasePath(e.target.value)} placeholder="/v1" />
+        </Field>
         <Field label="API Key" hint={editing ? '留空表示保留原密钥' : undefined}>
           <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={editing ? '(保留原密钥)' : 'sk-...'} />
         </Field>
@@ -112,6 +138,21 @@ function ProviderFormModal({
         </Field>
         <Field label="模型列表 URL(可选)" hint="默认 {base}/v1/models">
           <Input value={modelsUrl} onChange={(e) => setModelsUrl(e.target.value)} />
+        </Field>
+        <Field label="限流阻塞(可选)" hint="启用后:上游返回该错误码时阻塞该供应商,时长到期自动解除;默认 429 / 120 分钟(适配 codingplan 等 5 小时限额提供商)">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={rateLimitEnabled} onChange={(e) => setRateLimitEnabled(e.target.checked)} />
+              <span>启用</span>
+            </label>
+            <Input value={rateLimitStatus} onChange={(e) => setRateLimitStatus(e.target.value)} placeholder="429" title="触发限流阻塞的错误码" style={{ width: 84 }} />
+            <span className="faint">码</span>
+            <Input value={rateLimitDuration} onChange={(e) => setRateLimitDuration(e.target.value)} placeholder="120" title="限流阻塞时长(分钟)" style={{ width: 84 }} />
+            <span className="faint">分钟</span>
+          </div>
+        </Field>
+        <Field label="余额不足阻塞错误码(可选)" hint="上游返回该状态码时阻塞直到手动解除;留空默认 402,填 0 禁用">
+          <Input value={insufficientStatus} onChange={(e) => setInsufficientStatus(e.target.value)} placeholder="402" />
         </Field>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -238,10 +279,90 @@ function ModelRows({ models, onChange }: { models: ModelConfig[]; onChange: (v: 
   )
 }
 
+// 模板分类中文标签。
+const TEMPLATE_CATEGORY_LABEL: Record<string, string> = {
+  international: '国际',
+  chinese: '国内',
+  aggregator: '聚合 / 开放模型',
+  cloud: '云平台',
+}
+
+// 把模板转换为可直接预填表单的供应商配置(api_key 留空,由用户补)。
+// 模板不含硬编码模型,模型列表由用户在表单里点「获取模型列表」从服务商 API 拉取。
+function templateToSeed(t: ProviderTemplate): ProviderConfig {
+  return {
+    kind: t.kind,
+    name: t.name,
+    base_url: t.base_url,
+    base_path: t.base_path ?? '',
+    api_key: '',
+    models: [],
+    usage_url: t.usage_url ?? '',
+    models_url: t.models_url ?? '',
+  }
+}
+
+// 供应商模板库:按分类列出内置模板,点击「使用」预填表单(仅需补 api_key)。
+function TemplatePickerModal({
+  onClose, onPick,
+}: {
+  onClose: () => void
+  onPick: (seed: ProviderConfig) => void
+}) {
+  const { data, error, loading } = useAsync(() => api.listProviderTemplates())
+  const groups = new Map<string, ProviderTemplate[]>()
+  for (const t of data ?? []) {
+    const cat = TEMPLATE_CATEGORY_LABEL[t.category] ?? t.category
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat)!.push(t)
+  }
+
+  return (
+    <Modal
+      title="供应商模板库"
+      onClose={onClose}
+      wide
+      footer={<Button onClick={onClose}>取消</Button>}
+    >
+      <p className="form-hint" style={{ marginTop: 0, marginBottom: 14 }}>
+        选择一家服务商,自动填入 base_url / 接口格式。补上 API Key 后在表单里点「获取模型列表」从服务商 API 拉取模型,即可接入。
+      </p>
+      {loading ? <Empty text="加载中…" /> : error ? <ErrorAlert text={error} /> : null}
+      {!loading && !error
+        ? [...groups.entries()].map(([cat, items]) => (
+            <div key={cat} style={{ marginBottom: 16 }}>
+              <div className="page-sub" style={{ marginBottom: 6 }}>{cat}</div>
+              <div className="template-list">
+                {items.map((t) => (
+                  <div key={t.name} className="template-item">
+                    <div className="template-item-main">
+                      <div className="template-item-title">
+                        <strong>{t.display_name}</strong>
+                        <span className="mono faint">{t.name}</span>
+                        <Badge>{t.kind}</Badge>
+                        {t.base_path && t.base_path !== '/v1' ? <span className="mono faint">{t.base_path}</span> : null}
+                      </div>
+                      {t.description ? <div className="form-hint" style={{ marginTop: 0 }}>{t.description}</div> : null}
+                      <div className="mono faint" style={{ fontSize: 12 }}>{t.base_url}</div>
+                      {t.note ? <div className="form-hint">{t.note}</div> : null}
+                    </div>
+                    <Button variant="secondary" onClick={() => onPick(templateToSeed(t))}>使用</Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        : null}
+    </Modal>
+  )
+}
+
 export default function Providers() {
   const { data, error, loading, reload } = useAsync(() => api.listProviders())
   const [editing, setEditing] = useState<ProviderConfig | null>(null)
   const [adding, setAdding] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const [templateSeed, setTemplateSeed] = useState<ProviderConfig | null>(null)
   const [deleting, setDeleting] = useState<ProviderConfig | null>(null)
   const [notice, setNotice] = useState('')
   const [pingResult, setPingResult] = useState<{ name: string; result: PingResult } | null>(null)
@@ -303,10 +424,16 @@ export default function Providers() {
           <div className="page-title">供应商管理</div>
           <div className="page-sub">接入并管理真实的大模型供应商</div>
         </div>
-        <Button variant="primary" onClick={() => setAdding(true)}>
-          <IconPlus size={15} />
-          新增供应商
-        </Button>
+        <div className="toolbar">
+          <Button onClick={() => setPicking(true)}>
+            <IconGrid size={15} />
+            模板库
+          </Button>
+          <Button variant="primary" onClick={() => { setTemplateSeed(null); setAdding(true) }}>
+            <IconPlus size={15} />
+            新增供应商
+          </Button>
+        </div>
       </div>
 
       {notice ? <div className="alert">{notice}</div> : null}
@@ -363,12 +490,20 @@ export default function Providers() {
 
       {busyName ? <div style={{ marginTop: 12 }}><Spinner /> <span className="muted"> 处理 {busyName}…</span></div> : null}
 
+      {picking ? (
+        <TemplatePickerModal
+          onClose={() => setPicking(false)}
+          onPick={(seed) => { setTemplateSeed(seed); setPicking(false); setAdding(true) }}
+        />
+      ) : null}
+
       {adding ? (
         <ProviderFormModal
-          title="新增供应商"
+          title={templateSeed ? `接入 ${templateSeed.name}` : '新增供应商'}
           initial={null}
-          onClose={() => setAdding(false)}
-          onSaved={(msg) => { setNotice(msg); setAdding(false); reload() }}
+          seed={templateSeed}
+          onClose={() => { setAdding(false); setTemplateSeed(null) }}
+          onSaved={(msg) => { setNotice(msg); setAdding(false); setTemplateSeed(null); reload() }}
         />
       ) : null}
 

@@ -1,5 +1,5 @@
 import type {
-  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, CodexPresetCommand, CodexPresetConfig, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, SyncResult,
+  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, CodexPresetCommand, CodexPresetConfig, FaultList, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, ProviderTemplate, SyncResult, ZcodePresetConfig,
 } from './types'
 
 const KEY_STORAGE = 'bsrouter.api_key'
@@ -62,6 +62,7 @@ export { KINDS }
 
 export const api = {
   listProviders: () => request<ProviderConfig[]>('GET', '/manage/v1/providers'),
+  listProviderTemplates: () => request<ProviderTemplate[]>('GET', '/manage/v1/provider-templates'),
   addProvider: (c: ProviderConfig) => request<ProviderConfig>('POST', '/manage/v1/providers', c),
   updateProvider: (name: string, c: ProviderConfig) =>
     request<ProviderConfig>('PUT', `/manage/v1/providers/${encodeURIComponent(name)}`, c),
@@ -126,9 +127,22 @@ export const api = {
   applyCodexPresetLocal: (name: string) =>
     request<{ applied: boolean; path: string; auth_path?: string; model_catalog?: string }>('POST', `/manage/v1/codex-presets/${encodeURIComponent(name)}/apply-local`),
 
+  listZcodePresets: () => request<ZcodePresetConfig[]>('GET', '/manage/v1/zcode-presets'),
+  addZcodePreset: (c: ZcodePresetConfig) => request<ZcodePresetConfig>('POST', '/manage/v1/zcode-presets', c),
+  updateZcodePreset: (name: string, c: ZcodePresetConfig) =>
+    request<ZcodePresetConfig>('PUT', `/manage/v1/zcode-presets/${encodeURIComponent(name)}`, c),
+  deleteZcodePreset: (name: string) =>
+    request<void>('DELETE', `/manage/v1/zcode-presets/${encodeURIComponent(name)}`),
+  applyZcodePresetLocal: (name: string) =>
+    request<{ applied: boolean; path: string; models?: number; providers?: number }>('POST', `/manage/v1/zcode-presets/${encodeURIComponent(name)}/apply-local`),
+
   checkLocal: () => request<{ local: boolean }>('GET', '/manage/v1/local'),
 
   networkInfo: () => request<NetworkInfo>('GET', '/manage/v1/network'),
   setNetworkInfo: (c: { egress_host: string; egress_port: string }) =>
     request<NetworkInfo>('PUT', '/manage/v1/network', c),
+
+  listFaults: () => request<FaultList>('GET', '/manage/v1/faults'),
+  deleteFault: (id: string) =>
+    request<void>('DELETE', `/manage/v1/faults/${encodeURIComponent(id)}`),
 }

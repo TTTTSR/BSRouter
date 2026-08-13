@@ -289,15 +289,16 @@ func (r *Response) ToCompletion() *CompletionResponse {
 
 // CompletionProvider 通过 OpenAI chat.completions 接口发送请求。
 type CompletionProvider struct {
-	baseURL string
-	apiKey  string
-	httpc   *http.Client
+	baseURL  string
+	basePath string
+	apiKey   string
+	httpc    *http.Client
 }
 
 // NewCompletionProvider 基于共享配置构造 chat.completions 适配器。
 func NewCompletionProvider(c *Client) *CompletionProvider {
-	baseURL, apiKey, httpc := resolveClient(c, "https://api.openai.com")
-	return &CompletionProvider{baseURL: baseURL, apiKey: apiKey, httpc: httpc}
+	baseURL, basePath, apiKey, httpc := resolveClient(c, "https://api.openai.com")
+	return &CompletionProvider{baseURL: baseURL, basePath: basePath, apiKey: apiKey, httpc: httpc}
 }
 
 // Complete 实现 Provider 接口。
@@ -308,7 +309,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req *Request) (*Respo
 	wire := req.ToCompletion()
 	var resp CompletionResponse
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	if err := doJSON(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/chat/completions", headers, wire, &resp); err != nil {
+	if err := doJSON(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/chat/completions"), headers, wire, &resp); err != nil {
 		return nil, err
 	}
 	return resp.ToInternal(), nil
@@ -317,7 +318,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req *Request) (*Respo
 // CompleteRaw 发送原始 wire 请求体(直通)并返回原始响应体与上游状态码,不解析。
 func (p *CompletionProvider) CompleteRaw(ctx context.Context, raw json.RawMessage) (int, []byte, error) {
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	return doRaw(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/chat/completions", headers, raw)
+	return doRaw(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/chat/completions"), headers, raw)
 }
 
 // Stream 发送流式请求(stream:true)并返回上游 SSE 响应体,调用方负责 Close。
@@ -327,7 +328,7 @@ func (p *CompletionProvider) Stream(ctx context.Context, req *Request) (io.ReadC
 	}
 	wire := req.ToCompletion()
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	resp, err := doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/chat/completions", headers, wire)
+	resp, err := doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/chat/completions"), headers, wire)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +344,7 @@ func (p *CompletionProvider) Stream(ctx context.Context, req *Request) (io.ReadC
 // 非 2xx 由调用方检查 resp.StatusCode 并读取/关闭响应体。
 func (p *CompletionProvider) StreamRaw(ctx context.Context, raw json.RawMessage) (*http.Response, error) {
 	headers := map[string]string{"Authorization": "Bearer " + p.apiKey}
-	return doStream(ctx, p.httpc, http.MethodPost, p.baseURL+"/v1/chat/completions", headers, json.RawMessage(raw))
+	return doStream(ctx, p.httpc, http.MethodPost, joinPath(p.baseURL, p.basePath, "/chat/completions"), headers, json.RawMessage(raw))
 }
 
 // Do 实现 Requester 接口:chat.completions 请求体可直接发起请求。
