@@ -25,6 +25,7 @@ import (
 	"BSRouter/internal/apikey"
 	"BSRouter/internal/claude"
 	"BSRouter/internal/codex"
+	"BSRouter/internal/dsh"
 	"BSRouter/internal/fault"
 	"BSRouter/internal/group"
 	"BSRouter/internal/logger"
@@ -203,6 +204,8 @@ func main() {
 		codexPath = flag.String("codex", configPath(cfgDir, "codex.json"), "codex preset config JSON file path (empty disables)")
 		// Z.ai zcode 配置预设文件;传空字符串禁用。
 		zcodePath = flag.String("zcode", configPath(cfgDir, "zcode.json"), "zcode preset config JSON file path (empty disables)")
+		// DeepSeek Harness (dsh) 配置预设文件;传空字符串禁用。
+		dshPath = flag.String("dsh", configPath(cfgDir, "dsh.json"), "deepseek harness (dsh) preset config JSON file path (empty disables)")
 		// 聚合模型配置(剔除名单)文件;传空字符串禁用。
 		aggregatesPath = flag.String("aggregates", configPath(cfgDir, "aggregates.json"), "aggregate model config JSON file path (empty disables)")
 		// 出口地址配置(NAT 部署下用户填写的出口 IP 与映射端口)文件;传空字符串禁用。
@@ -222,18 +225,18 @@ func main() {
 		codexModelsCache = flag.String("codex-models-cache", "", "path to local codex models cache json to override (default ~/.codex/models_cache.json)")
 		// 覆盖本地 zcode 配置的目标 config.json 路径;留空默认 ~/.zcode/v2/config.json。
 		zcodeConfig = flag.String("zcode-config", "", "path to local zcode config.json to override (default ~/.zcode/v2/config.json)")
+		dshConfig   = flag.String("dsh-config", "", "path to local dsh settings.yaml to override (default ~/.dsh/settings.yaml)")
 		// 上游流式响应体 idle 超时:两字节数据到达间隔超过该值即中止流(上游挂起/断流时
 		// 避免无限等待并让错误可被记录)。默认 0 禁用(思考模型可能长时间无增量,启用时
 		// 建议 ≥120s)。
 		streamIdleTimeout = flag.Duration("stream-idle-timeout", 0, "upstream stream idle timeout (0 disables; abort when no stream data for this long, e.g. 120s)")
 		// 流开始前失败(请求发送错误 / 上游非 2xx)的每成员重试次数;默认 2(共尝试 3 次)。
 		streamRetries = flag.Int("stream-retries", 2, "retries per member for pre-stream failures (5xx / transport; 0 disables)")
-		// 故障提示模块文件;传空字符串禁用。
-		faultsPath = flag.String("faults", configPath(cfgDir, "faults.json"), "fault records JSON file path (empty disables)")
+		faultsPath    = flag.String("faults", configPath(cfgDir, "faults.json"), "fault records JSON file path (empty disables)")
 		// 故障捕捉模式:user 仅捕捉硬编码特定故障(当前仅余额不足);dev 捕捉所有错误(内部+上游)。
 		// 模式仅由启动参数指定,前端不提供切换。
 		faultMode = flag.String("fault-mode", string(fault.ModeUser), "fault capture mode (user: only hardcoded faults e.g. insufficient balance; dev: all errors)")
-		ver = flag.Bool("version", false, "print version and exit")
+		ver       = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 	if *ver {
@@ -272,6 +275,9 @@ func main() {
 		}
 		if !explicit["zcode"] {
 			migrateFile(*zcodePath, "zcode.json")
+		}
+		if !explicit["dsh"] {
+			migrateFile(*dshPath, "dsh.json")
 		}
 		if !explicit["aggregates"] {
 			migrateFile(*aggregatesPath, "aggregates.json")
@@ -349,6 +355,15 @@ func main() {
 		log.Printf("loaded %d zcode preset(s) from %s", zm.Count(), *zcodePath)
 	}
 
+	var dm *dsh.Manager
+	if *dshPath != "" {
+		dm, err = dsh.NewManager(*dshPath)
+		if err != nil {
+			log.Fatalf("load dsh preset config: %v", err)
+		}
+		log.Printf("loaded %d dsh preset(s) from %s", dm.Count(), *dshPath)
+	}
+
 	var am *aggregate.Manager
 	if *aggregatesPath != "" {
 		am, err = aggregate.NewManager(*aggregatesPath, mgr)
@@ -396,7 +411,7 @@ func main() {
 		log.Printf("deployment: -public-addr set, advertising base %s", strings.TrimRight(*publicAddr, "/"))
 	}
 
-	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithCodexPresets(xm).WithZcodePresets(zm).WithAggregates(am).WithFaults(fm).WithDeployment(dep).WithNetworkManager(nm).WithStreamIdleTimeout(*streamIdleTimeout).WithStreamRetries(*streamRetries)
+	srv := server.New(mgr).WithAPIKey(key).WithLogger(lg).WithGroups(gm).WithWebUI(webui.Handler()).WithAPIKeys(km).WithClaudePresets(cm).WithCodexPresets(xm).WithZcodePresets(zm).WithDshPresets(dm).WithAggregates(am).WithFaults(fm).WithDeployment(dep).WithNetworkManager(nm).WithStreamIdleTimeout(*streamIdleTimeout).WithStreamRetries(*streamRetries)
 	if *logDetailFile != "" {
 		srv = srv.WithLogDetailPath(*logDetailFile)
 	}
@@ -418,6 +433,9 @@ func main() {
 	}
 	if *zcodeConfig != "" {
 		srv = srv.WithZcodeConfigPath(*zcodeConfig)
+	}
+	if *dshConfig != "" {
+		srv = srv.WithDshSettingsPath(*dshConfig)
 	}
 
 	if key == "" {

@@ -38,6 +38,7 @@ import (
 	"BSRouter/internal/provider"
 	"BSRouter/internal/providertemplates"
 	"BSRouter/internal/zcode"
+	"BSRouter/internal/dsh"
 )
 
 // maxBodyBytes 限制入站请求体大小,防止未鉴权的内存耗尽。
@@ -51,6 +52,7 @@ type Server struct {
 	presets    *claude.Manager
 	codex      *codex.Manager
 	zcode      *zcode.Manager
+	dsh        *dsh.Manager
 	aggregates *aggregate.Manager
 	faults     *fault.Manager
 	apiKey     string
@@ -79,6 +81,9 @@ type Server struct {
 	// zcodeConfigPath 覆盖本地 zcode 配置的目标 config.json 路径;
 	// 留空时用 ~/.zcode/v2/config.json(仅测试/自定义使用)。
 	zcodeConfigPath string
+	// dshSettingsPath 覆盖本地 dsh 配置的目标 settings.yaml 路径;
+	// 留空时用 ~/.dsh/settings.yaml(仅测试/自定义使用)。
+	dshSettingsPath string
 	// deployment 部署形态(由 cmd/gateway 启动时判定);netm 是出口地址配置。
 	deployment *Deployment
 	netm       *network.Manager
@@ -176,6 +181,13 @@ func (s *Server) WithZcodePresets(cm *zcode.Manager) *Server {
 	return s
 }
 
+// WithDshPresets 启用 DeepSeek Harness (dsh) 配置预设管理(/manage/v1/dsh-presets)。
+// 需在 Handler() 之前调用。
+func (s *Server) WithDshPresets(cm *dsh.Manager) *Server {
+	s.dsh = cm
+	return s
+}
+
 // WithAggregates 启用聚合模型(自动聚合同名模型,裸名调用时轮询负载均衡)。
 // 需在 Handler() 之前调用。
 func (s *Server) WithAggregates(am *aggregate.Manager) *Server {
@@ -229,6 +241,13 @@ func (s *Server) WithCodexModelsCachePath(path string) *Server {
 // 留空时默认 ~/.zcode/v2/config.json。仅测试与自定义场景使用。
 func (s *Server) WithZcodeConfigPath(path string) *Server {
 	s.zcodeConfigPath = path
+	return s
+}
+
+// WithDshSettingsPath 指定"覆盖本地 dsh 配置"的目标 settings.yaml 路径。
+// 留空时默认 ~/.dsh/settings.yaml。仅测试与自定义场景使用。
+func (s *Server) WithDshSettingsPath(path string) *Server {
+	s.dshSettingsPath = path
 	return s
 }
 
@@ -337,6 +356,16 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("PUT /manage/v1/zcode-presets/{name}", s.handleUpdateZcodePreset)
 		mux.HandleFunc("DELETE /manage/v1/zcode-presets/{name}", s.handleDeleteZcodePreset)
 		mux.HandleFunc("POST /manage/v1/zcode-presets/{name}/apply-local", s.handleApplyZcodePresetLocal)
+	}
+	// DeepSeek Harness (dsh) 配置预设端点
+	if s.dsh != nil {
+		mux.HandleFunc("POST /manage/v1/dsh-presets", s.handleAddDshPreset)
+		mux.HandleFunc("GET /manage/v1/dsh-presets", s.handleListDshPresets)
+		mux.HandleFunc("GET /manage/v1/dsh-presets/{name}", s.handleGetDshPreset)
+		mux.HandleFunc("PUT /manage/v1/dsh-presets/{name}", s.handleUpdateDshPreset)
+		mux.HandleFunc("DELETE /manage/v1/dsh-presets/{name}", s.handleDeleteDshPreset)
+		mux.HandleFunc("GET /manage/v1/dsh-presets/{name}/command", s.handleDshPresetCommand)
+		mux.HandleFunc("POST /manage/v1/dsh-presets/{name}/apply-local", s.handleApplyDshPresetLocal)
 	}
 	// 聚合模型端点
 	if s.aggregates != nil {

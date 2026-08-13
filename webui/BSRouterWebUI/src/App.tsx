@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { APIError, api, clearAPIKey, getAPIKey, setAPIKey } from './lib/api'
-import { IconAlert, IconBox, IconCodex, IconDoc, IconKey, IconServer, IconTerminal, IconZcode } from './lib/icons'
+import { IconAlert, IconBox, IconCodex, IconDsh, IconDoc, IconKey, IconServer, IconTerminal, IconZcode } from './lib/icons'
 import { Button, Field, Input } from './components/ui'
 import Providers from './pages/Providers'
 import Models from './pages/Models'
@@ -10,9 +10,10 @@ import ApiKeys from './pages/ApiKeys'
 import ClaudePresets from './pages/ClaudePresets'
 import CodexPresets from './pages/CodexPresets'
 import ZcodePresets from './pages/ZcodePresets'
+import DshPresets from './pages/DshPresets'
 import type { ReactNode } from 'react'
 
-type Page = 'providers' | 'models' | 'logs' | 'faults' | 'apikeys' | 'claudepresets' | 'codexpresets' | 'zcodepresets'
+type Page = 'providers' | 'models' | 'logs' | 'faults' | 'apikeys' | 'claudepresets' | 'codexpresets' | 'zcodepresets' | 'dshpresets'
 
 const NAV: { key: Page; label: string; icon: ReactNode }[] = [
   { key: 'providers', label: '供应商管理', icon: <IconServer /> },
@@ -23,6 +24,7 @@ const NAV: { key: Page; label: string; icon: ReactNode }[] = [
   { key: 'claudepresets', label: 'Claude 预设', icon: <IconTerminal /> },
   { key: 'codexpresets', label: 'Codex 预设', icon: <IconCodex /> },
   { key: 'zcodepresets', label: 'zcode 预设', icon: <IconZcode /> },
+  { key: 'dshpresets', label: 'dsh 预设', icon: <IconDsh /> },
 ]
 
 function Login({ onAuthed }: { onAuthed: () => void }) {
@@ -152,7 +154,8 @@ export default function App() {
         {page === 'apikeys' ? <ApiKeys /> : null}
         {page === 'claudepresets' ? <ClaudePresets /> : null}
         {page === 'codexpresets' ? <CodexPresets /> : null}
-        {page === 'zcodepresets' ? <ZcodePresets /> : null}
+{page === 'zcodepresets' ? <ZcodePresets /> : null}
+        {page === 'dshpresets' ? <DshPresets /> : null}
       </main>
     </div>
   )

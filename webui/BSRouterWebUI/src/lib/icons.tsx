@@ -220,3 +220,12 @@ export function IconZcode({ size }: IconBase) {
     </S>
   )
 }
+
+// DeepSeek Harness 预设(dsh,锯齿/闪电图标)
+export function IconDsh({ size }: IconBase) {
+  return (
+    <S size={size}>
+      <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </S>
+  )
+}

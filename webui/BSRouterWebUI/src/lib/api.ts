@@ -1,5 +1,5 @@
 import type {
-  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, CodexPresetCommand, CodexPresetConfig, FaultList, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, ProviderTemplate, SyncResult, ZcodePresetConfig,
+  AggregateModel, APIKeyEntry, ClaudePresetCommand, ClaudePresetConfig, CodexPresetCommand, CodexPresetConfig, FaultList, GroupConfig, Kind, LogEntry, ModelList, NetworkInfo, PingResult, ProviderConfig, ProviderTemplate, SyncResult, ZcodePresetConfig, DshPresetCommand, DshPresetConfig,
 } from './types'
 
 const KEY_STORAGE = 'bsrouter.api_key'
@@ -135,6 +135,17 @@ export const api = {
     request<void>('DELETE', `/manage/v1/zcode-presets/${encodeURIComponent(name)}`),
   applyZcodePresetLocal: (name: string) =>
     request<{ applied: boolean; path: string; models?: number; providers?: number }>('POST', `/manage/v1/zcode-presets/${encodeURIComponent(name)}/apply-local`),
+
+  listDshPresets: () => request<DshPresetConfig[]>('GET', '/manage/v1/dsh-presets'),
+  addDshPreset: (c: DshPresetConfig) => request<DshPresetConfig>('POST', '/manage/v1/dsh-presets', c),
+  updateDshPreset: (name: string, c: DshPresetConfig) =>
+    request<DshPresetConfig>('PUT', `/manage/v1/dsh-presets/${encodeURIComponent(name)}`, c),
+  deleteDshPreset: (name: string) =>
+    request<void>('DELETE', `/manage/v1/dsh-presets/${encodeURIComponent(name)}`),
+  dshPresetCommand: (name: string) =>
+    request<DshPresetCommand>('GET', `/manage/v1/dsh-presets/${encodeURIComponent(name)}/command`),
+  applyDshPresetLocal: (name: string) =>
+    request<{ applied: boolean; path: string; provider?: string; api?: string; api_key_env?: string; models?: number }>('POST', `/manage/v1/dsh-presets/${encodeURIComponent(name)}/apply-local`),
 
   checkLocal: () => request<{ local: boolean }>('GET', '/manage/v1/local'),
 

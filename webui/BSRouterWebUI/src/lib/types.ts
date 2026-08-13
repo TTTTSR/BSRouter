@@ -176,6 +176,29 @@ export interface ZcodePresetConfig {
 }
 
 // 网关部署形态与出口地址(管理经 /manage/v1/network)。
+
+// DeepSeek Harness (dsh) 运行配置预设:把 BSRouter 作为一条自定义供应商覆盖进本地
+// ~/.dsh/settings.yaml 的 llm-pi-ai.providers map(保留其余内置/自定义供应商与顶层字段)。
+// 与 zcode 预设一致:只配置 api_key 与模型列表,接口格式 api / base_url / apiKeyEnv /
+// display_name 均由 apply-local 自动派生。models 留空回退网关全部可路由模型;
+// api_key 可选(留空注入网关默认 key)。
+export interface DshPresetConfig {
+  name: string
+  description?: string
+  api_key?: string
+  models?: string[]
+  created_at?: string
+}
+
+// dsh 预设对应的一键启动命令(PowerShell / bash),把 apiKeyEnv 环境变量设为真实密钥后启动 dsh。
+export interface DshPresetCommand {
+  name?: string
+  powershell: string
+  bash: string
+  api_key_env?: string
+}
+
+
 export interface NetworkInfo {
   remote: boolean
   mode: 'local' | 'direct' | 'nat'
